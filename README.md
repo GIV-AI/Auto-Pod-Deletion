@@ -14,7 +14,7 @@ The goal is to make sure:
 - Users don’t accidentally leave long-running workloads,
 - Everything stays clean without manual monitoring.
 
-This system runs **automatically every 2 hours**.
+This system runs **automatically at Your Desired Interval**.
 
 ---
 
@@ -62,7 +62,7 @@ All actions are logged to:
 
 ## 📁 **Files**
 ```
-cleanup_combined.sh
+auto-pod-deletion.sh
 cleanup_config.env
 README.md
 ```
@@ -71,7 +71,7 @@ README.md
 
 ## ⚙️ **Configuration Guide**
 
-### Enable/Disable Resource Cleanup
+### Enable/Disable Resource Cleanup by switching between `Yes`and `No`
 ```
 Deployment=Yes
 Pod=Yes
@@ -110,12 +110,12 @@ LOG_FILE="/var/log/auto_cleanup.log"
 
 ---
 
-## 🕒 **Cron Job (Runs Every 2 Hours)**
+## 🕒 **Cron Job (Runs at Your Desired Interval)**
 
-Add this to `sudo crontab -e`:
-
+Add the following entry to sudo crontab -e, and replace each * with your desired schedule values in the order:
+Minute / Hour / Day-of-Month / Month / Day-of-Week
 ```
-0 */2 * * * /bin/bash /path/to/cleanup_combined.sh >> /var/log/auto_cleanup_cron.log 2>&1
+* * * * * /bin/bash /path/to/auto-pod-deletion.sh >> /var/log/auto_cleanup_cron.log 2>&1
 ```
 
 ---
@@ -123,7 +123,7 @@ Add this to `sudo crontab -e`:
 ## 🚀 **Setup Steps**
 
 ```
-chmod +x cleanup_combined.sh
+chmod +x auto-pod-deletion.sh
 nano cleanup_config.env
 sudo crontab -e
 ```
