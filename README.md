@@ -1,4 +1,4 @@
-# 🧹 **Auto Cleanup System for Kubernetes Pods, Deployments & Services**
+# 🧹 **Auto Cleanup System for Kubernetes Deployments, Pods & Services**
 ### *A simple, automated tool to keep your DGX Kubernetes namespaces clean and healthy*
 
 ## 📌 **Overview**
