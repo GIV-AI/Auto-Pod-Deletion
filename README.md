@@ -108,11 +108,6 @@ CPU_THRESHOLD=100
 LOG_FILE="/var/log/auto_cleanup.log"
 ```
 
-### Dry Run Mode
-```
-DRY_RUN=1
-```
-
 ---
 
 ## 🕒 **Cron Job (Runs Every 2 Hours)**
