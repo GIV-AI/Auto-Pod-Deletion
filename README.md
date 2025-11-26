@@ -135,7 +135,6 @@ sudo crontab -e
 - Namespace filtering  
 - CPU-based protection  
 - User-friendly config  
-- DRY-RUN safe testing  
 
 ---
 
