@@ -12,14 +12,16 @@ echo "Auto Cleanup (Deployments -> Pods) started..."
 # ---------- CONFIG ----------
 CONFIG_FILE="./cleanup_config.env"
 if [[ -f "$CONFIG_FILE" ]]; then
-  # shellcheck disable=SC1090
+
+# shellcheck disable=SC1090
+
   source "$CONFIG_FILE"
 else
   echo "Config file $CONFIG_FILE not found!" >&2
   exit 1
 fi
 
-LOG_FILE="${LOG_FILE:-/var/log/auto_cleanup.log}"
+LOG_FILE="${LOG_FILE:-/var/log/giindia/auto_cleanup_logs/auto_cleanup.log}"
 log() {
   echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
 }
@@ -73,217 +75,30 @@ pod_soft_enabled=false
 
 log "Config summary: Deployment enabled=${is_deployment_enabled}, DeployHard=${deploy_hard_enabled}, DeploySoft=${deploy_soft_enabled}; Pod enabled=${is_pod_enabled}, PodHard=${pod_hard_enabled}, PodSoft=${pod_soft_enabled}"
 
-# ---------- COMMON SERVICE-DELETION HELPER ----------
-# -------------------------------
-# NEW FUNCTION: Delete Services linked to a Deployment
-# -------------------------------
-delete_services_for_deployment() {
-  local name=$1
-  local ns=$2
-
-  log "Searching for services linked to deployment $name ($ns)"
-
-  selector_json=$(kubectl get deploy "$name" -n "$ns" -o json 2>/dev/null)
-  if [[ -z "$selector_json" ]]; then
-    log "Cannot fetch selector for deployment $name ($ns)"
-    return
-  fi
-
-  # Extract all labels into KEY=VAL array
-  mapfile -t label_array < <(
-    echo "$selector_json" | jq -r '
-      .spec.template.metadata.labels
-      | to_entries
-      | .[] 
-      | "\(.key)=\(.value)"
-    '
-  )
-
-  if (( ${#label_array[@]} == 0 )); then
-    log "No labels found for deployment -> no services evaluated"
-    return
-  fi
-
-  log "Labels to check individually: ${label_array[*]}"
-
-  # Create an associative array to avoid duplicates
-  declare -A svc_map
-
-  # Check each label independently
-  for lbl in "${label_array[@]}"; do
-    log "Checking services whose selector matches deployment label: $lbl"
-
-    # Split KEY=VALUE from "app=ml"
-    key="${lbl%%=*}"
-    val="${lbl#*=}"
-
-    # Find services whose selector contains this key/value
-    mapfile -t found_svcs < <(
-      kubectl get svc -n "$ns" -o json \
-      | jq -r --arg k "$key" --arg v "$val" '
-          .items[]
-          | select(.spec.selector[$k] == $v)
-          | .metadata.name
-        ' 2>/dev/null
-    )
-
-    # Add matched services to svc_map (unique list)
-    for svc in "${found_svcs[@]}"; do
-      svc_map["$svc"]=1
-    done
-  done
-
-
-  # -------------------------------------------------------------------
-
-  same_name_svc=$(kubectl get svc "$name" -n "$ns" --no-headers 2>/dev/null | awk '{print $1}')
-
-  if [[ -n "$same_name_svc" ]]; then
-    log "Found service with same name as deployment: $same_name_svc"
-    svc_map["$same_name_svc"]=1
-  fi
-
-  # -------------------------------------------------------------------
-
-  # Put union result in array
-  svc_list=("${!svc_map[@]}")
-
-  if (( ${#svc_list[@]} == 0 )); then
-    log "No services found for ANY label of deployment"
-    return
-  fi
-
-  log "Services found for deletion: ${svc_list[*]}"
-
-  for svc in "${svc_list[@]}"; do
-    log "Deleting service $svc ($ns)"
-    kubectl delete svc "$svc" -n "$ns" >> "$LOG_FILE" 2>&1 || \
-      log "Failed to delete service $svc ($ns)"
-  done
-}
-
-
-delete_services_for_pod() {
-  local pod="$1"
-  local ns="$2"
-
-  log "Searching for services linked to pod $pod ($ns)"
-
-  # Get pod JSON
-  pod_json=$(kubectl get pod "$pod" -n "$ns" -o json 2>/dev/null)
-  if [[ -z "$pod_json" ]]; then
-    log "Failed to fetch pod $pod ($ns)"
-    return
-  fi
-
-  # Extract ALL labels as KEY=VAL pairs
-  mapfile -t label_array < <(
-    echo "$pod_json" | jq -r '
-      .metadata.labels
-      | to_entries
-      | .[]
-      | "\(.key)=\(.value)"
-    '
-  )
-
-  if (( ${#label_array[@]} == 0 )); then
-    log "Pod $pod ($ns): No labels found on pod → no label-based service lookup"
-  else
-    log "Pod $pod ($ns): Labels to check individually: ${label_array[*]}"
-  fi
-
-  # Hashmap for dedupe
-  declare -A svc_map
-
-  # -------------------------------------------------------------
-  # Check EACH label independently (same logic as deployment version)
-  # -------------------------------------------------------------
-  for lbl in "${label_array[@]}"; do
-    log "Checking services whose selector contains: $lbl"
-
-    # Split KEY=VALUE into key and value
-    key="${lbl%%=*}"
-    val="${lbl#*=}"
-
-    # Query all services in the namespace and filter by selector
-    mapfile -t found_svcs < <(
-      kubectl get svc -n "$ns" -o json \
-      | jq -r --arg k "$key" --arg v "$val" '
-          .items[]
-          | select(.spec.selector[$k] == $v)
-          | .metadata.name
-        ' 2>/dev/null
-    )
-
-    if (( ${#found_svcs[@]} == 0 )); then
-      log "No services found whose selector matches '$lbl'"
-      continue
-    fi
-
-    log "Services matched for selector '$lbl': ${found_svcs[*]}"
-
-    # Add to map
-    for svc in "${found_svcs[@]}"; do
-      svc_map["$svc"]=1
-    done
-  done
-
-
-  # -------------------------------------------------------------
-  # Check if any service has the same NAME as the pod
-  # -------------------------------------------------------------
-  same_name_svc=$(kubectl get svc "$pod" -n "$ns" --no-headers 2>/dev/null | awk '{print $1}')
-
-  if [[ -n "$same_name_svc" ]]; then
-    log "Found service with same name as pod: $same_name_svc"
-    svc_map["$same_name_svc"]=1
-  fi
-
-  # -------------------------------------------------------------
-  # Final service list
-  # -------------------------------------------------------------
-  svc_list=("${!svc_map[@]}")
-
-  if (( ${#svc_list[@]} == 0 )); then
-    log "Pod $pod ($ns): No matched services found → nothing to delete"
-    return
-  fi
-
-  log "Services selected for deletion: ${svc_list[*]}"
-
-  # -------------------------------------------------------------
-  # Delete all unique services
-  # -------------------------------------------------------------
-  for svc in "${svc_list[@]}"; do
-    log "Deleting service '$svc' ($ns)"
-    kubectl delete svc "$svc" -n "$ns" >> "$LOG_FILE" 2>&1 || \
-      log "Failed to delete service '$svc' ($ns)"
-  done
-}
-
 
 # ---------- DEPLOYMENT CLEANUP ----------
 cleanup_deployment() {
-  local age=$1; local name=$2; local ns=$3; local soft=$4; local hard=$5; local cpu_thr=$6
+  local age=$1; local name=$2; local ns=$3; local soft=$4; local hard=$5
 
   # HARD branch (only if enabled)
   if $deploy_hard_enabled && (( age >= hard )); then
     log "Deployment $name ($ns): age ${age}m >= hard limit ${hard}m -> deleting (hard limit)"
     echo "Deployment $name ($ns): HARD delete triggered"
-    delete_services_for_deployment "$name" "$ns"
+#    delete_services_for_deployment "$name" "$ns"
     kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) on hard limit"
     return
   fi
 
   # SOFT branch (only if enabled)
   if $deploy_soft_enabled && (( age >= soft )); then
-    log "Deployment $name ($ns): age ${age}m >= soft limit ${soft}m -> Evaluating keep-alive + CPU"
-    echo "Deployment $name ($ns): SOFT-evaluation triggered"
+    log "Deployment $name ($ns): age ${age}m >= soft limit ${soft}m -> Evaluating keep-alive"
+    echo "Deployment $name ($ns): Evaluating keep-alive"
 
     keep_alive_label=$(kubectl get deployment "$name" -n "$ns" -o jsonpath='{.metadata.labels.keep-alive}' 2>/dev/null || echo "")
     if [[ -z "$keep_alive_label" ]]; then
       log "Deployment $name ($ns): keep-alive label NOT present -> deleting (soft path)"
-      delete_services_for_deployment "$name" "$ns"
+      echo "Deployment $name ($ns): keep-alive label NOT present -> deleting (soft path)"
+ #     delete_services_for_deployment "$name" "$ns"
       kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) (no keep-alive)"
       return
     fi
@@ -291,59 +106,25 @@ cleanup_deployment() {
     keep_alive_label_lower=$(echo "$keep_alive_label" | tr '[:upper:]' '[:lower:]')
     if [[ "$keep_alive_label_lower" == "false" ]]; then
       log "Deployment $name ($ns): keep-alive=false -> deleting (soft path)"
-      delete_services_for_deployment "$name" "$ns"
+      echo "Deployment $name ($ns): keep-alive=false -> deleting (soft path)"
+  #    delete_services_for_deployment "$name" "$ns"
       kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) (keep-alive=false)"
       return
     fi
 
     if [[ "$keep_alive_label_lower" != "true" ]]; then
       log "Deployment $name ($ns): INVALID keep-alive='$keep_alive_label' -> deleting (soft path)"
-      delete_services_for_deployment "$name" "$ns"
+      echo "Deployment $name ($ns): INVALID keep-alive='$keep_alive_label' -> deleting (soft path)"
+   #   delete_services_for_deployment "$name" "$ns"
       kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) (invalid keep-alive)"
       return
-    fi
+     fi
 
-    # build selector (preferring matchLabels)
-    selector=$(kubectl get deployment "$name" -n "$ns" -o json | \
-               jq -r ' .metadata.labels | to_entries | map("\(.key)=\(.value)") | join(",")')
-    echo "$selector"
-
-    if [[ -z "$selector" ]]; then
-      log "Deployment $name ($ns): No selector found -> keeping deployment"
+     if [[ "$keep_alive_label_lower" = "true" ]]; then
+      log "Deployment $name ($ns): 'Keep Alive' tag present -> keeping deployment"
+      echo "Deployment $name ($ns): 'Keep Alive' tag present -> keeping deployment"
       return
-    fi
-
-    log "Checking CPU for Pods with selector: $selector"
-
-    mapfile -t cpu_list < <(kubectl top pods -n "$ns" -l "$selector" --no-headers 2>/dev/null | awk '{print $2}')
-    if (( ${#cpu_list[@]} == 0 )); then
-      log "Deployment $name ($ns): No CPU data returned -> keeping deployment"
-      return
-    fi
-
-    all_below_threshold=true
-    for cpu_raw in "${cpu_list[@]}"; do
-      if [[ $cpu_raw == *m ]]; then
-        cpu_val=${cpu_raw%m}
-      elif [[ $cpu_raw =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        cpu_val=$(awk -v v="$cpu_raw" 'BEGIN{ printf("%d", v * 1000) }')
-      else
-        cpu_val=0
-      fi
-      log "Deployment $name ($ns): Pod CPU=${cpu_val}m threshold=${cpu_thr}m"
-      if (( cpu_val >= cpu_thr )); then
-        all_below_threshold=false
-      fi
-    done
-
-    if $all_below_threshold; then
-      log "Deployment $name ($ns): ALL pods CPU < threshold -> deleting (soft/CPU path)"
-      delete_services_for_deployment "$name" "$ns"
-      kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) after CPU check"
-    else
-      log "Deployment $name ($ns): At least one pod CPU >= threshold -> keeping deployment"
-    fi
-    return
+     fi
   fi
 
   # If neither hard nor soft path triggered or they were disabled:
@@ -352,24 +133,24 @@ cleanup_deployment() {
 
 # ---------- POD CLEANUP ----------
 cleanup_pod() {
-  local age=$1; local name=$2; local ns=$3; local soft=$4; local hard=$5; local cpu_thr=$6
+  local age=$1; local name=$2; local ns=$3; local soft=$4; local hard=$5
 
   if $pod_hard_enabled && (( age >= hard )); then
     log "Pod $name ($ns): age ${age}m >= hard limit ${hard}m -> deleting (hard limit)"
     echo "Pod $name ($ns): HARD delete triggered"
-    delete_services_for_pod "$name" "$ns"
+    #delete_services_for_pod "$name" "$ns"
     kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) on hard limit"
     return
   fi
 
   if $pod_soft_enabled && (( age >= soft )); then
-    log "Pod $name ($ns): age ${age}m >= soft limit ${soft}m -> evaluating keep-alive label and CPU"
-    echo "Pod $name ($ns): SOFT-evaluation triggered"
+    log "Pod $name ($ns): age ${age}m >= soft limit ${soft}m -> evaluating keep-alive label"
+    echo "Pod $name ($ns): Evaluating keep-alive label"
 
     keep_alive_label=$(kubectl get pod "$name" -n "$ns" -o jsonpath='{.metadata.labels.keep-alive}' 2>/dev/null || echo "")
     if [[ -z "$keep_alive_label" ]]; then
       log "Pod $name ($ns): keep-alive label NOT present -> deleting (soft path)"
-      delete_services_for_pod "$name" "$ns"
+     # delete_services_for_pod "$name" "$ns"
       kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) (no keep-alive)"
       return
     fi
@@ -377,40 +158,22 @@ cleanup_pod() {
     keep_alive_label_lower=$(echo "$keep_alive_label" | tr '[:upper:]' '[:lower:]')
     if [[ "$keep_alive_label_lower" == "false" ]]; then
       log "Pod $name ($ns): keep-alive=false -> deleting (soft path)"
-      delete_services_for_pod "$name" "$ns"
+      #delete_services_for_pod "$name" "$ns"
       kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) (keep-alive=false)"
       return
     fi
 
     if [[ "$keep_alive_label_lower" != "true" ]]; then
       log "Pod $name ($ns): keep-alive label value='$keep_alive_label' is not 'true' -> deleting (soft path)"
-      delete_services_for_pod "$name" "$ns"
+     # delete_services_for_pod "$name" "$ns"
       kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) (invalid keep-alive)"
       return
     fi
 
-    log "Pod $name ($ns): keep-alive=true -> checking CPU usage"
-    cpu_raw=$(kubectl top pod "$name" -n "$ns" --no-headers 2>/dev/null | awk '{print $2}' || echo "")
-    if [[ -z "$cpu_raw" ]]; then
-      log "Pod $name ($ns): kubectl top returned no CPU value -> cannot evaluate CPU; keeping pod"
+    if [[ "$keep_alive_label_lower" = "true" ]]; then
+      log "Pod $name ($ns): 'Keep Alive' tag present -> keeping pod"
+      echo "Pod $name ($ns): 'Keep Alive' tag present -> keeping pod"
       return
-    fi
-
-    if [[ $cpu_raw == *m ]]; then
-      cpu=${cpu_raw%m}
-    elif [[ $cpu_raw =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-      cpu=$(awk -v v="$cpu_raw" 'BEGIN{ printf("%d", v * 1000) }')
-    else
-      cpu=0
-    fi
-
-    log "Pod $name ($ns): CPU usage ${cpu}m; threshold ${cpu_thr}m"
-    if (( cpu > cpu_thr )); then
-      log "Pod $name ($ns): CPU ${cpu}m > threshold ${cpu_thr}m -> keeping pod"
-    else
-      log "Pod $name ($ns): CPU ${cpu}m <= threshold ${cpu_thr}m -> deleting pod (soft/CPU path)"
-      delete_services_for_pod "$name" "$ns"
-      kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) after CPU check"
     fi
     return
   fi
@@ -439,7 +202,7 @@ if $is_deployment_enabled; then
       continue
     fi
 
-    cleanup_deployment "$age_min" "$deployname" "$namespace" "$soft_limit" "$hard_limit" "$CPU_THRESHOLD"
+    cleanup_deployment "$age_min" "$deployname" "$namespace" "$soft_limit" "$hard_limit"
   done
 else
   log "Deployment checks disabled by config -> skipping all deployments."
@@ -447,7 +210,7 @@ fi
 
 # ---------- Then Pods (only if enabled) ----------
 if $is_pod_enabled; then
-  
+
   mapfile -t pods < <(
   kubectl get pods -A --no-headers \
   | awk '/^dgx-/ {print $1, $2}' \
@@ -494,11 +257,65 @@ if $is_pod_enabled; then
       continue
     fi
 
-    cleanup_pod "$age_min" "$podname" "$namespace" "$soft_limit" "$hard_limit" "$CPU_THRESHOLD"
+    cleanup_pod "$age_min" "$podname" "$namespace" "$soft_limit" "$hard_limit"
   done
 else
   log "Pod checks disabled by config -> skipping all pods."
 fi
+# ---------- FINAL STEP: ORPHAN SERVICE SWEEP ----------
+log "Starting orphan-service sweep: deleting services with ZERO endpoints."
+
+# Find all namespaces that begin with dgx-
+mapfile -t target_namespaces < <(
+  kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
+  | awk '/^dgx-/'
+)
+
+for ns in "${target_namespaces[@]}"; do
+  log "Scanning services in namespace $ns"
+
+  # Get services and endpoints in one shot
+  svc_json=$(kubectl get svc -n "$ns" -o json 2>/dev/null)
+  endpoints_json=$(kubectl get endpoints -n "$ns" -o json 2>/dev/null)
+
+  if [[ -z "$svc_json" ]]; then
+    log "No services found in $ns"
+    continue
+  fi
+
+  # Extract all services
+  mapfile -t svc_names < <(
+    echo "$svc_json" | jq -r '.items[] | .metadata.name // empty'
+  )
+
+  for svc in "${svc_names[@]}"; do
+
+    # Skip headless services
+    cluster_ip=$(echo "$svc_json" | jq -r --arg s "$svc" '.items[] | select(.metadata.name==$s) | .spec.clusterIP // empty')
+    if [[ "$cluster_ip" == "None" ]]; then
+      log "Service $svc ($ns) is headless -> skipping"
+      continue
+    fi
+
+    # Extract endpoint IPs
+    svc_ips=$(echo "$endpoints_json" | jq -r --arg s "$svc" '
+      .items[]
+      | select(.metadata.name==$s)
+      | ([.subsets[]?.addresses[]?.ip] | join(","))
+    ')
+
+    # If svc_ips is empty or null → no endpoints → safe to delete
+    if [[ -z "$svc_ips" ]]; then
+      log "Service $svc ($ns): NO endpoints -> deleting service"
+      kubectl delete svc "$svc" -n "$ns" >> "$LOG_FILE" 2>&1 \
+        || log "Failed to delete orphan service $svc ($ns)"
+    else
+      log "Service $svc ($ns) has endpoints ($svc_ips) -> NOT deleting"
+    fi
+
+  done
+done
+
+log "Orphan-service sweep completed."
 
 echo "Auto Cleanup completed."
-
