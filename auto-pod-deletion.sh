@@ -81,16 +81,15 @@ cleanup_deployment() {
   local age=$1; local name=$2; local ns=$3; local soft=$4; local hard=$5
 
   # HARD branch (only if enabled)
-  if $deploy_hard_enabled && (( age >= hard )); then
+  if $deploy_hard_enabled && (( age > hard )); then
     log "Deployment $name ($ns): age ${age}m >= hard limit ${hard}m -> deleting (hard limit)"
     echo "Deployment $name ($ns): HARD delete triggered"
-#    delete_services_for_deployment "$name" "$ns"
     kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) on hard limit"
     return
   fi
 
   # SOFT branch (only if enabled)
-  if $deploy_soft_enabled && (( age >= soft )); then
+  if $deploy_soft_enabled && (( age > soft )); then
     log "Deployment $name ($ns): age ${age}m >= soft limit ${soft}m -> Evaluating keep-alive"
     echo "Deployment $name ($ns): Evaluating keep-alive"
 
@@ -98,7 +97,6 @@ cleanup_deployment() {
     if [[ -z "$keep_alive_label" ]]; then
       log "Deployment $name ($ns): keep-alive label NOT present -> deleting (soft path)"
       echo "Deployment $name ($ns): keep-alive label NOT present -> deleting (soft path)"
- #     delete_services_for_deployment "$name" "$ns"
       kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) (no keep-alive)"
       return
     fi
@@ -107,7 +105,6 @@ cleanup_deployment() {
     if [[ "$keep_alive_label_lower" == "false" ]]; then
       log "Deployment $name ($ns): keep-alive=false -> deleting (soft path)"
       echo "Deployment $name ($ns): keep-alive=false -> deleting (soft path)"
-  #    delete_services_for_deployment "$name" "$ns"
       kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) (keep-alive=false)"
       return
     fi
@@ -115,7 +112,6 @@ cleanup_deployment() {
     if [[ "$keep_alive_label_lower" != "true" ]]; then
       log "Deployment $name ($ns): INVALID keep-alive='$keep_alive_label' -> deleting (soft path)"
       echo "Deployment $name ($ns): INVALID keep-alive='$keep_alive_label' -> deleting (soft path)"
-   #   delete_services_for_deployment "$name" "$ns"
       kubectl delete deployment "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete deployment $name ($ns) (invalid keep-alive)"
       return
      fi
@@ -135,22 +131,20 @@ cleanup_deployment() {
 cleanup_pod() {
   local age=$1; local name=$2; local ns=$3; local soft=$4; local hard=$5
 
-  if $pod_hard_enabled && (( age >= hard )); then
+  if $pod_hard_enabled && (( age > hard )); then
     log "Pod $name ($ns): age ${age}m >= hard limit ${hard}m -> deleting (hard limit)"
     echo "Pod $name ($ns): HARD delete triggered"
-    #delete_services_for_pod "$name" "$ns"
     kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) on hard limit"
     return
   fi
 
-  if $pod_soft_enabled && (( age >= soft )); then
+  if $pod_soft_enabled && (( age > soft )); then
     log "Pod $name ($ns): age ${age}m >= soft limit ${soft}m -> evaluating keep-alive label"
     echo "Pod $name ($ns): Evaluating keep-alive label"
 
     keep_alive_label=$(kubectl get pod "$name" -n "$ns" -o jsonpath='{.metadata.labels.keep-alive}' 2>/dev/null || echo "")
     if [[ -z "$keep_alive_label" ]]; then
       log "Pod $name ($ns): keep-alive label NOT present -> deleting (soft path)"
-     # delete_services_for_pod "$name" "$ns"
       kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) (no keep-alive)"
       return
     fi
@@ -158,14 +152,12 @@ cleanup_pod() {
     keep_alive_label_lower=$(echo "$keep_alive_label" | tr '[:upper:]' '[:lower:]')
     if [[ "$keep_alive_label_lower" == "false" ]]; then
       log "Pod $name ($ns): keep-alive=false -> deleting (soft path)"
-      #delete_services_for_pod "$name" "$ns"
       kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) (keep-alive=false)"
       return
     fi
 
     if [[ "$keep_alive_label_lower" != "true" ]]; then
       log "Pod $name ($ns): keep-alive label value='$keep_alive_label' is not 'true' -> deleting (soft path)"
-     # delete_services_for_pod "$name" "$ns"
       kubectl delete pod "$name" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete Pod $name ($ns) (invalid keep-alive)"
       return
     fi
@@ -262,60 +254,106 @@ if $is_pod_enabled; then
 else
   log "Pod checks disabled by config -> skipping all pods."
 fi
-# ---------- FINAL STEP: ORPHAN SERVICE SWEEP ----------
-log "Starting orphan-service sweep: deleting services with ZERO endpoints."
 
-# Find all namespaces that begin with dgx-
+# ---------- FINAL STEP: ORPHAN SERVICE SWEEP (with soft/hard age checks) ----------
+log "Starting orphan-service sweep with soft/hard age checks."
+
+# ---------- Helper: age calculation using creationTimestamp ----------
+get_age_minutes() {
+  local resource=$1; local name=$2; local ns=$3
+  creation_ts=$(kubectl get "$resource" "$name" -n "$ns" -o jsonpath='{.metadata.creationTimestamp}' 2>/dev/null || echo "")
+  if [[ -z "$creation_ts" ]]; then
+    echo "-1"
+    return
+  fi
+  created_epoch=$(date -d "$creation_ts" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date +%s)
+  if [[ "$created_epoch" -le 0 ]]; then
+    echo "-1"
+    return
+  fi
+  echo $(( (now_epoch - created_epoch) / 60 ))
+}
+
+
+# Get namespaces that start with dgx-
 mapfile -t target_namespaces < <(
-  kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' \
-  | awk '/^dgx-/'
+  kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | awk '/^dgx-/'
 )
 
-for ns in "${target_namespaces[@]}"; do
+for ns in "${target_namespaces[@]:-}"; do
   log "Scanning services in namespace $ns"
 
-  # Get services and endpoints in one shot
+  # Fetch services and endpoints for namespace (single-shot)
   svc_json=$(kubectl get svc -n "$ns" -o json 2>/dev/null)
   endpoints_json=$(kubectl get endpoints -n "$ns" -o json 2>/dev/null)
 
   if [[ -z "$svc_json" ]]; then
-    log "No services found in $ns"
+    log "No services found or failed to fetch services in $ns"
     continue
   fi
 
-  # Extract all services
-  mapfile -t svc_names < <(
-    echo "$svc_json" | jq -r '.items[] | .metadata.name // empty'
-  )
+  # Get list of service names
+  mapfile -t svc_names < <(echo "$svc_json" | jq -r '.items[] | .metadata.name' 2>/dev/null || echo "")
 
-  for svc in "${svc_names[@]}"; do
-
-    # Skip headless services
-    cluster_ip=$(echo "$svc_json" | jq -r --arg s "$svc" '.items[] | select(.metadata.name==$s) | .spec.clusterIP // empty')
+  for svc in "${svc_names[@]:-}"; do
+    # Skip headless services (clusterIP == "None")
+    cluster_ip=$(echo "$svc_json" | jq -r --arg s "$svc" '.items[] | select(.metadata.name==$s) | .spec.clusterIP // empty' 2>/dev/null || echo "")
     if [[ "$cluster_ip" == "None" ]]; then
-      log "Service $svc ($ns) is headless -> skipping"
+      log "Service $svc ($ns) is headless (clusterIP=None) -> skipping"
       continue
     fi
 
-    # Extract endpoint IPs
-    svc_ips=$(echo "$endpoints_json" | jq -r --arg s "$svc" '
-      .items[]
-      | select(.metadata.name==$s)
-      | ([.subsets[]?.addresses[]?.ip] | join(","))
-    ')
-
-    # If svc_ips is empty or null → no endpoints → safe to delete
-    if [[ -z "$svc_ips" ]]; then
-      log "Service $svc ($ns): NO endpoints -> deleting service"
-      kubectl delete svc "$svc" -n "$ns" >> "$LOG_FILE" 2>&1 \
-        || log "Failed to delete orphan service $svc ($ns)"
-    else
-      log "Service $svc ($ns) has endpoints ($svc_ips) -> NOT deleting"
+    # Compute service age (minutes) using existing helper
+    age_min=$(get_age_minutes "service" "$svc" "$ns")
+    if [[ "$age_min" == "-1" ]]; then
+      log "No Service found inside the namespcae: ($ns): Nothing to delete"
+         # If we cannot get age, be conservative and skip deletion
+      continue
     fi
 
+    # Determine policy limits based on namespace prefix
+    if [[ $ns == dgx-s* ]]; then
+      soft_limit="$STUDENT_SOFT"
+      hard_limit="$STUDENT_HARD"
+    elif [[ $ns == dgx-f* ]] || [[ $ns == dgx-i* ]]; then
+      soft_limit="$FACULTY_SOFT"
+      hard_limit="$FACULTY_HARD"
+    else
+      # Not a target namespace (shouldn't happen because we filtered), skip
+      continue
+    fi
+
+    log "Service $svc ($ns): age=${age_min}m soft=${soft_limit}m hard=${hard_limit}m"
+
+    # If hard limit breached -> delete immediately (regardless of endpoints)
+    if (( age_min >= hard_limit )); then
+      log "Service $svc ($ns): age ${age_min}m >= hard limit ${hard_limit}m -> deleting (hard limit)"
+      kubectl delete svc "$svc" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete service $svc ($ns) on hard limit"
+      continue
+    fi
+
+    # If soft limit not breached -> keep (give user time)
+    if (( age_min < soft_limit )); then
+      log "Service $svc ($ns): age ${age_min}m < soft limit ${soft_limit}m -> keeping"
+      continue
+    fi
+
+    # At this point: soft <= age < hard -> check endpoints
+    svc_ips=$(echo "$endpoints_json" | jq -r --arg s "$svc" '
+      .items[] | select(.metadata.name==$s) | ( ([.subsets[]?.addresses[]?.ip] // []) | join(",") )
+    ' 2>/dev/null || echo "")
+
+    if [[ -z "$svc_ips" ]]; then
+      log "Service $svc ($ns): age ${age_min}m >= soft ${soft_limit}m AND NO endpoints -> deleting (soft path)"
+      kubectl delete svc "$svc" -n "$ns" >> "$LOG_FILE" 2>&1 || log "Failed to delete service $svc ($ns) on soft-no-endpoints"
+    else
+      log "Service $svc ($ns): age ${age_min}m >= soft ${soft_limit}m BUT endpoints present (${svc_ips}) -> keeping"
+    fi
   done
 done
 
-log "Orphan-service sweep completed."
+log "Orphan-service sweep (with age checks) completed."
+
 
 echo "Auto Cleanup completed."
