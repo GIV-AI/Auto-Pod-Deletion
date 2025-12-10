@@ -41,23 +41,22 @@ Each resource (Deployment / Pod / Service) follows:
 
 ### 1️⃣ Hard Limit (Forced Delete)
 If:
-```
 
-AGE ≥ HARD\_LIMIT
+AGE ≥ HARD LIMIT
 
-```yaml
-➡ Resource is **deleted immediately**  
+Then:
+
 ➡ `keep-alive` label is **ignored**
+➡ Resource is **deleted immediately**  
 
 ---
 
 ### 2️⃣ Soft Limit (Conditional Delete)
 If:
-```
+---
 
-AGE ≥ SOFT\_LIMIT
+AGE ≥ SOFT LIMIT
 
-```yaml
 Then:
 
 | keep-alive Label | Action |
@@ -69,11 +68,10 @@ Then:
 ---
 
 ### 3️⃣ Below Soft Limit
-```
+---
 
-AGE < SOFT\_LIMIT
+AGE < SOFT LIMIT
 
-```yaml
 ➡ Resource is always **preserved**
 
 ---
@@ -87,17 +85,19 @@ Instead:
 1. All eligible pods are:
    - Evaluated
    - Queued into a memory array
+
 2. The script issues:
-```
 
-kubectl delete pod pod1 pod2 pod3 ...
+   kubectl delete pod pod1 pod2 pod3 ...
+   
+4. Pods enter **Terminating state**
 
-```yaml
-3. Pods enter **Terminating state**
-4. Script **immediately proceeds to services**
-5. Script **does NOT wait for completion**
+5. Script **immediately proceeds to services**
+
+6. Script **does NOT wait for completion**
 
 ✅ Eliminates **50+ minute deletion delays**
+
 ✅ Safe for **hourly cron schedules**
 
 ---
@@ -118,7 +118,6 @@ Namespace prefix determines which limits apply:
 
 To protect any resource:
 
-```yaml
 metadata:
 labels:
  keep-alive: "true"
