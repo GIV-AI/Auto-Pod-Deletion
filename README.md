@@ -21,7 +21,7 @@ The script **always runs in this strict order**:
 3. **Services Cleanup**
 4. **Exit & Unlock**
 
-No step blocks the next.
+➡ No step blocks the next.
 
 ---
 
@@ -47,13 +47,13 @@ AGE ≥ HARD LIMIT
 Then:
 
 ➡ `keep-alive` label is **ignored**
+
 ➡ Resource is **deleted immediately**  
 
 ---
 
 ### 2️⃣ Soft Limit (Conditional Delete)
 If:
----
 
 AGE ≥ SOFT LIMIT
 
@@ -62,13 +62,12 @@ Then:
 | keep-alive Label | Action |
 |------------------|--------|
 | Not present      | DELETE |
-| false            | DELETE |
-| true             | SKIP   |
+| FALSE/False/false| DELETE |
+| TRUE/True/true   | SKIP   |
 
 ---
 
 ### 3️⃣ Below Soft Limit
----
 
 AGE < SOFT LIMIT
 
@@ -119,12 +118,14 @@ Namespace prefix determines which limits apply:
 To protect any resource:
 
 metadata:
-labels:
- keep-alive: "true"
-```
 
-This protects it **only under soft-limit conditions**.  
-**Hard limit always overrides.**
+ labels:
+ 
+   keep-alive: "true"
+
+➡ This protects it from **only under soft-limit conditions**.  
+
+➡ **Hard limit always overrides.**
 
 ---
 
@@ -141,11 +142,11 @@ These files must exist in the same directory as the script:
 
 ### File Format
 
-```pgsql
 resource-name
+
 resource-name-2
-# comments are allowed
-```
+
+➡ Comments are allowed
 
 ---
 
@@ -153,52 +154,56 @@ resource-name-2
 
 ### ✅ Enable / Disable Resource Types
 
-```env
 Deployment=True
+
 Pod=True
+
 Service=True
-```
 
 ---
 
 ### ✅ Enable / Disable Hard / Soft Logic Per Resource
 
-```env
 Deployment_HardLimit=True
+
 Deployment_SoftLimit=True
 
+
 Pod_HardLimit=True
+
 Pod_SoftLimit=True
 
+
 Service_HardLimit=True
+
 Service_SoftLimit=True
-```
 
 ---
 
 ### ✅ Time Limits (Minutes)
 
-```env
 # Students
-STUDENT_SOFT=2
-STUDENT_HARD=40
+STUDENT_SOFT=00
+
+STUDENT_HARD=00
+
 
 # Faculty
-FACULTY_SOFT=2
-FACULTY_HARD=40
+FACULTY_SOFT=00
+
+FACULTY_HARD=00
+
 
 # Industry
-INDUSTRY_SOFT=2
-INDUSTRY_HARD=25
-```
+INDUSTRY_SOFT=00
+
+INDUSTRY_HARD=00
 
 ---
 
 ### ✅ Logging Output
 
-```env
 LOG_FILE="/var/log/giindia/auto_cleanup_logs/auto_cleanup.logs"
-```
 
 ---
 
@@ -215,11 +220,11 @@ Every action is:
 
 Examples:
 
-```pgsql
 Pod user-pod-1 (dgx-s-1): keep-alive=false -> deleting (soft path)
+
 Deployment train-job (dgx-f-2): HARD delete triggered
+
 Service api-svc (dgx-i-1): safe/untouched
-```
 
 ---
 
@@ -227,45 +232,19 @@ Service api-svc (dgx-i-1): safe/untouched
 
 Run every hour:
 
-```bash
 0 * * * * /bin/bash /root/auto-pod-delete/auto-pod-deletion-final.sh
-```
 
 ---
 
 ## ✅ Safety Guarantees
 
 -   No duplicate executions
-    
--   No service deleted before pods
-    
--   No pod blocking service cleanup
-    
--   No student resource deleted using faculty policy
-    
+            
 -   No skipped namespace touched
     
 -   No excluded resource touched
     
 -   No cluster freeze during mass deletions
-    
-
----
-
-## ✅ Production Ready Status
-
-This script is now **fully suitable for**:
-
--   NVIDIA DGX Kubernetes Clusters
-    
--   University GPU Labs
-    
--   Multi-tenant AI infra
-    
--   Research clusters
-    
--   Slurm-to-Kubernetes hybrid environments
-    
 
 ---
 
@@ -273,11 +252,11 @@ This script is now **fully suitable for**:
 
 -   Always test with:
     
-    ```ini
     Service=False
+
     Pod=False
+
     Deployment=False
-    ```
     
 -   Then enable resources gradually.
     
