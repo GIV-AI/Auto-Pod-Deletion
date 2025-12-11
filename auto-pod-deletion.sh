@@ -261,7 +261,7 @@ cleanup_resource() {
     keep_alive="$(kubectl get "$kind" "$name" -n "$ns" -o jsonpath='{.metadata.labels.keep-alive}' 2>/dev/null || echo "")"
     keep_lc="$(printf '%s' "$keep_alive" | tr '[:upper:]' '[:lower:]')"
 
-    if [ -z "$keep_lc" ] || [ "$keep_lc" = "false" ] || [ "$keep_lc" != "true" ] && [ "$keep_lc" != "false" ]; then
+    if [ -z "$keep_lc" ] || [ "$keep_lc" = "false" ] || [ "$keep_lc" != "true" ]; then
       # no label, false, or invalid -> delete
       if [ "$kind" = "pod" ]; then
         POD_DELETE_QUEUE+=( "$ns/$name" )
