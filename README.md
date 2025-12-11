@@ -81,23 +81,25 @@ Pods are **NOT deleted one-by-one**.
 
 Instead:
 
-1. All eligible pods are:
+1. All eligible **standalone pods** (pods without ownerReferences) are:
    - Evaluated
    - Queued into a memory array
 
-2. The script issues:
+2. The script issues batched deletions:
 
-   kubectl delete pod pod1 pod2 pod3 ...
+   kubectl delete pod pod1 pod2 pod3 ... -n <namespace>
    
-4. Pods enter **Terminating state**
+3. Pods enter **Terminating state**
 
-5. Script **immediately proceeds to services**
+4. Script **immediately proceeds to services**
 
-6. Script **does NOT wait for completion**
+5. Script **does NOT wait for completion** (when background delete is enabled)
 
 ✅ Eliminates **50+ minute deletion delays**
 
 ✅ Safe for **hourly cron schedules**
+
+> **Note:** Only standalone pods (not managed by Deployments, ReplicaSets, Jobs, etc.) are processed. Pods with `ownerReferences` are automatically skipped.
 
 ---
 
@@ -131,7 +133,7 @@ metadata:
 
 ## ⛔ Exclusion System (Full Control)
 
-These files must exist in the same directory as the script:
+These files should be placed in the same directory as the script (optional - missing files are ignored):
 
 | File | Purpose |
 | --- | --- |
@@ -183,27 +185,37 @@ Service_SoftLimit=True
 ### ✅ Time Limits (Minutes)
 
 # Students
-STUDENT_SOFT=00
+STUDENT_SOFT=2
 
-STUDENT_HARD=00
+STUDENT_HARD=30
 
 
 # Faculty
-FACULTY_SOFT=00
+FACULTY_SOFT=2
 
-FACULTY_HARD=00
+FACULTY_HARD=30
 
 
 # Industry
-INDUSTRY_SOFT=00
+INDUSTRY_SOFT=2
 
-INDUSTRY_HARD=00
+INDUSTRY_HARD=10
+
+---
+
+### ✅ Pod Batch Deletion Settings
+
+POD_FORCE_DELETE=false    # If true, uses --grace-period=0 --force
+
+POD_BACKGROUND_DELETE=true   # If true, runs deletion in background (non-blocking)
+
+POD_BATCH_SIZE=50   # Number of pods to delete per kubectl command
 
 ---
 
 ### ✅ Logging Output
 
-LOG_FILE="/var/log/giindia/auto_cleanup_logs/auto_cleanup.logs"
+LOG_FILE="/var/log/giindia/auto_cleanup_logs/auto_cleanup.log"
 
 ---
 
@@ -232,7 +244,7 @@ Service api-svc (dgx-i-1): safe/untouched
 
 Run every hour:
 
-0 * * * * /bin/bash /root/auto-pod-delete/auto-pod-deletion-final.sh
+0 * * * * /bin/bash /path/to/auto-pod-deletion.sh
 
 ---
 
