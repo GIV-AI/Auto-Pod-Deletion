@@ -16,12 +16,16 @@
 readonly _CLEANUP_SH_LOADED=1
 
 # Module version
-readonly CLEANUP_VERSION="2.0.0"
+readonly CLEANUP_VERSION="1.0.0"
 
 # ============================================================================
 # LIMIT FLAG STATE
 # ============================================================================
-# These are set after config is loaded via init_limit_flags()
+# These flags are initialized from config via init_limit_flags().
+# Not readonly because they're set dynamically after config is loaded.
+#
+# Hard limit: Always deletes when age exceeds limit (ignores keep-alive label).
+# Soft limit: Respects keep-alive=true label; deletes only if not set/false.
 DEPLOY_HARD_FLAG="false"
 DEPLOY_SOFT_FLAG="false"
 POD_HARD_FLAG="false"
@@ -29,7 +33,7 @@ POD_SOFT_FLAG="false"
 SERVICE_HARD_FLAG="false"
 SERVICE_SOFT_FLAG="false"
 
-# Resource enable flags
+# Resource enable flags (derived from config + limit combinations)
 is_deployment_enabled="false"
 is_pod_enabled="false"
 is_service_enabled="false"
@@ -37,13 +41,17 @@ is_service_enabled="false"
 # ============================================================================
 # POD DELETION QUEUE
 # ============================================================================
-# Queue for batched pod deletion (ns/pod format)
+# `declare -a` creates an indexed array (0, 1, 2...).
+# Pods are queued during processing and deleted in batches for efficiency.
+# Format: "namespace/podname" (e.g., "dgx-s-user1/training-pod")
 declare -a POD_DELETE_QUEUE=()
 
-# Pod deletion behavior settings (with defaults)
-POD_FORCE_DELETE="${POD_FORCE_DELETE:-false}"
-POD_BACKGROUND_DELETE="${POD_BACKGROUND_DELETE:-true}"
-POD_BATCH_SIZE="${POD_BATCH_SIZE:-50}"
+# Pod deletion behavior settings (with defaults).
+# ${VAR:-default} syntax: Use VAR if set and non-empty, otherwise use default.
+# These can be overridden by the config file.
+POD_FORCE_DELETE="${POD_FORCE_DELETE:-false}"      # Use --grace-period=0 --force
+POD_BACKGROUND_DELETE="${POD_BACKGROUND_DELETE:-true}"  # Run kubectl in background
+POD_BATCH_SIZE="${POD_BATCH_SIZE:-50}"             # Pods per kubectl command
 
 # ============================================================================
 # INITIALIZATION
@@ -56,7 +64,9 @@ POD_BATCH_SIZE="${POD_BATCH_SIZE:-50}"
 #   are enabled based on their hard/soft limit settings.
 # ----------------------------------------------------------------------------
 init_limit_flags() {
-    # Normalize resource enable flags
+    # Normalize resource enable flags from config.
+    # ${Deployment:-False} uses the Deployment config variable or "False" if unset.
+    # norm_flag() converts various boolean representations to "true"/"false".
     local deployment_flag pod_flag service_flag
     deployment_flag="$(norm_flag "${Deployment:-False}")"
     pod_flag="$(norm_flag "${Pod:-False}")"
@@ -72,7 +82,8 @@ init_limit_flags() {
     SERVICE_HARD_FLAG="$(norm_flag "${Service_HardLimit:-False}")"
     SERVICE_SOFT_FLAG="$(norm_flag "${Service_SoftLimit:-False}")"
 
-    # If both hard & soft are disabled, disable the resource entirely
+    # If both hard & soft are disabled, disable the resource entirely.
+    # This prevents unnecessary kubectl queries for resources with no active limits.
     if [[ "$DEPLOY_HARD_FLAG" == "false" && "$DEPLOY_SOFT_FLAG" == "false" ]]; then
         deployment_flag="false"
         log_info "Deployment hard & soft both disabled -> Deployment checks disabled"
@@ -93,10 +104,13 @@ init_limit_flags() {
     is_pod_enabled="$pod_flag"
     is_service_enabled="$service_flag"
 
-    # Validate and set pod batch size
+    # Validate pod batch size is a positive integer.
+    # grep -E = Extended regex, -q = Quiet mode (no output, just exit status).
+    # ^[0-9]+$ = String containing only digits (positive integer).
     if ! printf '%s' "$POD_BATCH_SIZE" | grep -Eq '^[0-9]+$'; then
         POD_BATCH_SIZE=50
     fi
+    # -le = Less than or equal (arithmetic comparison)
     if [[ "$POD_BATCH_SIZE" -le 0 ]]; then
         POD_BATCH_SIZE=50
     fi
@@ -179,12 +193,15 @@ cleanup_resource() {
         log_info "Soft limit reached for $kind $name ($ns) (age=${age}m >= ${soft}m) -> Checking keep-alive"
         echo "$kind $name ($ns): soft limit reached, evaluating keep-alive"
 
-        # Get keep-alive label value
+        # Get keep-alive label value from Kubernetes resource metadata.
+        # tr '[:upper:]' '[:lower:]' converts to lowercase for case-insensitive compare.
         local keep_alive keep_lc
         keep_alive="$(get_keep_alive_label "$kind" "$name" "$ns")"
         keep_lc="$(printf '%s' "$keep_alive" | tr '[:upper:]' '[:lower:]')"
 
-        # Delete if keep-alive is not explicitly "true"
+        # Delete if keep-alive is not explicitly "true".
+        # Conditions checked: empty, "false", or anything other than "true".
+        # This means missing label = delete, "false" = delete, "TRUE" = keep.
         if [[ -z "$keep_lc" || "$keep_lc" == "false" || "$keep_lc" != "true" ]]; then
             if [[ "$kind" == "pod" ]]; then
                 POD_DELETE_QUEUE+=("$ns/$name")
@@ -219,6 +236,7 @@ cleanup_resource() {
 #   sizes. Supports force delete and background execution modes.
 # ----------------------------------------------------------------------------
 flush_pod_queue() {
+    # ${#array[@]} returns the number of elements in the array.
     local queue_size="${#POD_DELETE_QUEUE[@]}"
     log_info "Flushing Pod deletion queue ($queue_size pods)..."
 
@@ -227,21 +245,27 @@ flush_pod_queue() {
         return 0
     fi
 
-    # Group pods by namespace using associative array
+    # Group pods by namespace using associative array (hash/dictionary).
+    # `declare -A` creates an associative array with string keys.
+    # This allows efficient grouping: PODS_BY_NS["dgx-s-user1"]="pod1 pod2"
     declare -A PODS_BY_NS=()
 
     for item in "${POD_DELETE_QUEUE[@]:-}"; do
-        # Skip empty entries
+        # Skip empty entries (:-} provides empty default if array is unset)
         [[ -z "$item" ]] && continue
 
-        # Parse ns/pod format
+        # Parse "namespace/podname" format using parameter expansion.
+        # ${item%%/*} = Remove longest match of /* from end (keeps namespace).
+        # ${item##*/} = Remove longest match of */ from start (keeps podname).
+        # Example: "dgx-s-user1/train-pod" → ns="dgx-s-user1", pod="train-pod"
         local ns="${item%%/*}"
         local pod="${item##*/}"
 
-        # Skip malformed entries
+        # Skip malformed entries (e.g., missing / separator)
         [[ -z "$ns" || -z "$pod" ]] && continue
 
-        # Append pod to namespace group
+        # Append pod to namespace group (space-separated list).
+        # ${PODS_BY_NS[$ns]:-} returns empty string if key doesn't exist.
         if [[ -z "${PODS_BY_NS[$ns]:-}" ]]; then
             PODS_BY_NS["$ns"]="$pod"
         else
@@ -249,42 +273,56 @@ flush_pod_queue() {
         fi
     done
 
-    # Process each namespace
+    # Process each namespace.
+    # ${!array[@]} returns all keys of an associative array.
     for ns in "${!PODS_BY_NS[@]}"; do
-        # Convert space-separated list to array
+        # Convert space-separated list to array.
+        # `read -r -a array` reads words into array elements.
+        #   -r = Don't interpret backslashes as escapes.
+        #   -a = Read into indexed array.
+        # <<< "string" is a here-string (feeds string as stdin to command).
         local -a pods_in_ns
         read -r -a pods_in_ns <<< "${PODS_BY_NS[$ns]}"
         local total="${#pods_in_ns[@]}"
         local idx=0
 
+        # Process pods in batches of POD_BATCH_SIZE.
+        # -lt = Less than (arithmetic comparison).
         while [[ "$idx" -lt "$total" ]]; do
-            # Build a batch
+            # Build a batch up to POD_BATCH_SIZE pods
             local -a batch=()
             local count=0
 
             while [[ "$idx" -lt "$total" && "$count" -lt "$POD_BATCH_SIZE" ]]; do
                 batch+=("${pods_in_ns[$idx]}")
+                # $(( )) is arithmetic expansion for integer math.
                 idx=$((idx + 1))
                 count=$((count + 1))
             done
 
-            # Build kubectl command
+            # Build kubectl command as array (safe for special characters).
             local -a cmd=(kubectl delete pod)
             cmd+=("${batch[@]}")
             cmd+=(-n "$ns")
 
             if [[ "$POD_FORCE_DELETE" == "true" ]]; then
+                # --grace-period=0 --force = Immediate termination without graceful shutdown.
                 cmd+=(--grace-period=0 --force)
             fi
 
+            # ${batch[*]} expands array elements as single string (space-separated).
             log_info "Deleting pods in batch (namespace=$ns): ${batch[*]} (force=$POD_FORCE_DELETE background=$POD_BACKGROUND_DELETE)"
 
             # Execute deletion
             if [[ "$POD_BACKGROUND_DELETE" == "true" ]]; then
-                # Run in background - don't wait for completion
+                # `nohup` runs command immune to hangup signals (SIGHUP).
+                # Prevents kubectl from terminating if parent shell exits.
+                # & at end runs command in background (non-blocking).
+                # Output redirected to LOG_FILE to capture any errors.
                 nohup "${cmd[@]}" >> "$LOG_FILE" 2>&1 &
             else
-                # Run synchronously
+                # Run synchronously (blocking) - wait for kubectl to complete.
+                # || is OR - runs log_error only if kubectl returns non-zero.
                 "${cmd[@]}" >> "$LOG_FILE" 2>&1 || \
                     log_error "kubectl delete returned non-zero for pods (${batch[*]}) in ns=$ns"
             fi
@@ -314,16 +352,23 @@ process_deployments() {
 
     log_info "Starting Deployment cleanup..."
 
+    # Read output from get_deployments line by line.
+    # `read -r ns name _` reads whitespace-separated fields into variables.
+    #   -r = Don't interpret backslashes as escapes.
+    #   _ = Discard remaining fields (age column, unused here).
+    # < <(cmd) is process substitution (avoids subshell variable scope issues).
     while read -r ns name _; do
+        # Skip empty lines or malformed input
         [[ -z "$ns" || -z "$name" ]] && continue
 
         local age_min limits soft hard
         age_min="$(get_age_minutes deployment "$name" "$ns")"
         limits="$(get_limits_for_namespace "$ns")"
 
-        # Skip if namespace doesn't match patterns
+        # Skip if namespace doesn't match any user-type pattern (dgx-s/f/i)
         [[ -z "$limits" ]] && continue
 
+        # <<< is a here-string: "soft hard" becomes stdin for read.
         read -r soft hard <<< "$limits"
         cleanup_resource "deployment" "$age_min" "$name" "$ns" "$soft" "$hard"
 
@@ -346,10 +391,13 @@ process_pods() {
 
     log_info "Starting Pod scan & queueing..."
 
+    # Process pods line by line from get_pods output.
+    # Pods are queued (not deleted immediately) for batch processing.
     while read -r ns name _; do
         [[ -z "$ns" || -z "$name" ]] && continue
 
-        # Skip namespace/pod exclusions early
+        # Apply exclusion filters early to avoid unnecessary kubectl calls.
+        # Check order: namespace first (cheaper), then specific pod name.
         if is_namespace_excluded "$ns"; then
             log_debug "Skipping pod $name ($ns) -> namespace excluded"
             continue
@@ -360,7 +408,9 @@ process_pods() {
             continue
         fi
 
-        # Only process standalone pods (no owner references)
+        # Only process standalone pods (no owner references).
+        # Managed pods (from Deployments, Jobs, etc.) are handled by their controllers.
+        # `!` negates the return value: continue if pod IS managed.
         if ! is_standalone_pod "$name" "$ns"; then
             continue
         fi
@@ -369,7 +419,7 @@ process_pods() {
         age_min="$(get_age_minutes pod "$name" "$ns")"
         limits="$(get_limits_for_namespace "$ns")"
 
-        # Skip if namespace doesn't match patterns
+        # Skip if namespace doesn't match any user-type pattern (dgx-s/f/i)
         [[ -z "$limits" ]] && continue
 
         read -r soft hard <<< "$limits"
@@ -394,6 +444,8 @@ process_services() {
 
     log_info "Starting Service cleanup..."
 
+    # Services are deleted immediately (not batched like pods).
+    # Services are independent of pods/deployments and can be cleaned up anytime.
     while read -r ns name _; do
         [[ -z "$ns" || -z "$name" ]] && continue
 
@@ -401,7 +453,7 @@ process_services() {
         age_min="$(get_age_minutes service "$name" "$ns")"
         limits="$(get_limits_for_namespace "$ns")"
 
-        # Skip if namespace doesn't match patterns
+        # Skip if namespace doesn't match any user-type pattern (dgx-s/f/i)
         [[ -z "$limits" ]] && continue
 
         read -r soft hard <<< "$limits"

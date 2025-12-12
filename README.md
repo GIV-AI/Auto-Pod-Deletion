@@ -80,39 +80,43 @@ Edit `/etc/auto-cleanup/auto-cleanup.conf`:
 ### Enable/Disable Resource Types
 
 ```bash
-Deployment=True
-Pod=True
-Service=True
+Deployment=true
+Pod=true
+Service=true
 ```
 
 ### Enable/Disable Limit Types
 
 ```bash
-Deployment_HardLimit=True
-Deployment_SoftLimit=True
+Deployment_HardLimit=true
+Deployment_SoftLimit=true
 
-Pod_HardLimit=True
-Pod_SoftLimit=True
+Pod_HardLimit=true
+Pod_SoftLimit=true
 
-Service_HardLimit=True
-Service_SoftLimit=True
+Service_HardLimit=true
+Service_SoftLimit=true
 ```
 
-### Time Limits (Minutes)
+### Time Limits
+
+Time values support suffixes: `M` for minutes, `H` for hours. No suffix defaults to minutes.
 
 ```bash
 # Student namespaces (dgx-s-*)
-STUDENT_SOFT=60
-STUDENT_HARD=1440
+STUDENT_SOFT=24H
+STUDENT_HARD=36H
 
 # Faculty namespaces (dgx-f-*)
-FACULTY_SOFT=120
-FACULTY_HARD=2880
+FACULTY_SOFT=36H
+FACULTY_HARD=84H
 
 # Industry namespaces (dgx-i-*)
-INDUSTRY_SOFT=60
-INDUSTRY_HARD=1440
+INDUSTRY_SOFT=84H
+INDUSTRY_HARD=168H
 ```
+
+Examples: `30M` = 30 minutes, `2H` = 2 hours (120 minutes), `30` = 30 minutes
 
 ### Pod Batch Deletion
 

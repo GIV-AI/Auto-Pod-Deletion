@@ -15,16 +15,18 @@
 readonly _EXCLUSIONS_SH_LOADED=1
 
 # Module version
-readonly EXCLUSIONS_VERSION="2.0.0"
+readonly EXCLUSIONS_VERSION="1.0.0"
 
 # ============================================================================
 # EXCLUSION LIST STORAGE
 # ============================================================================
-# Global arrays to store exclusion lists
-declare -a EX_NS=()
-declare -a EX_DEPLOY=()
-declare -a EX_POD=()
-declare -a EX_SVC=()
+# Global indexed arrays to store exclusion lists.
+# `declare -a` creates an indexed array (0, 1, 2...).
+# Arrays are populated from text files via load_all_exclusions().
+declare -a EX_NS=()      # Excluded namespaces
+declare -a EX_DEPLOY=()  # Excluded deployment names
+declare -a EX_POD=()     # Excluded pod names
+declare -a EX_SVC=()     # Excluded service names
 
 # ============================================================================
 # EXCLUSION FILE PATHS
@@ -62,7 +64,7 @@ init_exclusion_paths() {
 # load_list - Load exclusion list from file into array
 # Arguments:
 #   $1 - File path to read from
-#   $2 - Name of output array variable
+#   $2 - Name of output array variable (e.g., "EX_NS")
 # Description:
 #   Reads a file line by line, stripping comments (# ...) and whitespace.
 #   Empty lines are skipped. Results are stored in the named array.
@@ -74,19 +76,32 @@ load_list() {
     local -a arr=()
 
     if [[ -f "$file" ]]; then
+        # Read file line by line with proper handling for edge cases.
+        # `IFS=` prevents leading/trailing whitespace from being stripped.
+        # `-r` prevents backslash interpretation (e.g., \n stays as \n).
+        # `|| [[ -n "$line" ]]` handles files without trailing newline.
+        #   Without this, the last line would be skipped if it lacks \n.
         while IFS= read -r line || [[ -n "$line" ]]; do
-            # Strip comments (everything after #)
+            # ${line%%#*} removes everything from # to end of line (longest match).
+            # This strips inline comments: "value # comment" → "value "
             line="${line%%#*}"
-            # Trim leading and trailing whitespace
+
+            # `sed -e 's/pattern/replacement/'` performs substitution.
+            # ^[[:space:]]* = Leading whitespace (spaces, tabs).
+            # [[:space:]]*$ = Trailing whitespace.
+            # Both are replaced with empty string (trimmed).
             line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-            # Skip empty lines
+
+            # Skip empty lines (after comment/whitespace removal)
             [[ -z "$line" ]] && continue
             arr+=("$line")
         done < "$file"
     fi
 
-    # Use eval to assign array to named variable
-    # shellcheck disable=SC2086
+    # Use eval to dynamically assign array to the variable named in $out_var.
+    # This is necessary because Bash doesn't support indirect array assignment.
+    # Example: if out_var="EX_NS", this executes: EX_NS=("${arr[@]}")
+    # shellcheck disable=SC2086 (intentional word splitting for array expansion)
     eval "$out_var=(\"\${arr[@]}\")"
 }
 
@@ -119,24 +134,31 @@ load_all_exclusions() {
 # in_list - Check if a value exists in a list
 # Arguments:
 #   $1 - Value to search for
-#   $@ - List elements to search in (remaining arguments)
+#   $@ - List elements to search in (remaining arguments after shift)
 # Returns:
 #   0 if value is found in list, 1 otherwise
 # Example:
 #   if in_list "my-ns" "${EX_NS[@]}"; then echo "excluded"; fi
+# Description:
+#   Performs exact string matching (not pattern/regex).
+#   Case-sensitive: "MyPod" != "mypod".
 # ----------------------------------------------------------------------------
 in_list() {
     local value="$1"
+    # `shift` removes $1, making $@ contain only the list elements.
     shift
     local item
 
+    # Loop through all remaining arguments (list elements).
+    # "$@" expands each element as a separate word (safe for spaces).
     for item in "$@"; do
+        # Exact string comparison (not pattern matching).
         if [[ "$item" == "$value" ]]; then
-            return 0
+            return 0  # Found - return success (true)
         fi
     done
 
-    return 1
+    return 1  # Not found - return failure (false)
 }
 
 # ----------------------------------------------------------------------------
@@ -145,9 +167,14 @@ in_list() {
 #   $1 - Namespace name to check
 # Returns:
 #   0 if excluded, 1 otherwise
+# Description:
+#   Namespaces in the exclusion list will have ALL their resources skipped.
+#   This is a more powerful exclusion than per-resource exclusions.
 # ----------------------------------------------------------------------------
 is_namespace_excluded() {
     local ns="$1"
+    # ${EX_NS[@]:-} expands to array elements, or empty if array is unset.
+    # The :- prevents "unbound variable" errors with set -u.
     in_list "$ns" "${EX_NS[@]:-}"
 }
 
@@ -195,19 +222,24 @@ is_service_excluded() {
 #   $3 - Namespace
 # Returns:
 #   0 if excluded (by namespace or name), 1 otherwise
+# Description:
+#   Combines namespace and resource-specific exclusion checks.
+#   Namespace exclusion is checked first as it's the broader filter.
 # ----------------------------------------------------------------------------
 is_resource_excluded() {
     local kind="$1"
     local name="$2"
     local ns="$3"
 
-    # Check namespace exclusion first
+    # Check namespace exclusion first (broader filter, cheaper to check).
+    # If namespace is excluded, skip all resources in it.
     if is_namespace_excluded "$ns"; then
         log_debug "Skipping $kind $name in namespace $ns -> namespace excluded"
         return 0
     fi
 
-    # Check resource-specific exclusion
+    # Check resource-specific exclusion based on kind.
+    # `case` is preferred over if/elif for multiple string comparisons.
     case "$kind" in
         deployment)
             if is_deployment_excluded "$name"; then
@@ -227,6 +259,7 @@ is_resource_excluded() {
                 return 0
             fi
             ;;
+        # No default case needed - unknown kinds are not excluded
     esac
 
     return 1
