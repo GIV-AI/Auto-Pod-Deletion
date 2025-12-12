@@ -4,6 +4,10 @@
 # Local development files
 TODO.md
 
+# Claude IDE
+CLAUDE.md
+.claude/
+
 # Test artifacts
 tests/*.log
 tests/tmp/
