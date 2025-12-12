@@ -1,277 +1,263 @@
-# ✅ Kubernetes Auto Resource Cleanup Tool (Deployments, Pods & Services)
+# Auto-Cleanup
 
-This tool is a **policy-driven Kubernetes auto-cleanup system** designed for **multi-user GPU clusters** (DGX, HPC, academic labs, shared infra). It automatically deletes **stale Deployments, Pods, and Services** based on **hard & soft age limits**, while supporting:
+Kubernetes auto-cleanup tool for multi-user GPU clusters (DGX, HPC, academic labs). Automatically deletes stale **Deployments**, **Pods**, and **Services** based on configurable age limits with user-type policies.
 
-- ✅ User-type based limits (Student / Faculty / Industry)
-- ✅ Namespace-level exclusions
-- ✅ Resource-specific exclusions
-- ✅ `keep-alive=true` label protection
-- ✅ Batched background pod deletion (non-blocking)
-- ✅ Cron-safe execution (no deadlocks)
-- ✅ Full audit logging
+## Features
 
----
+- **User-type based limits** (Student / Faculty / Industry via namespace prefix)
+- **Namespace-level exclusions**
+- **Resource-specific exclusions**
+- **`keep-alive=true` label protection** (respects soft limits)
+- **Batched background pod deletion** (non-blocking)
+- **Cron-safe execution** (lock-based, no deadlocks)
+- **Day-wise log rotation** with configurable retention
+- **Modular architecture** for maintainability
 
-## 🧠 Execution Order (Guaranteed)
+## Project Structure
 
-The script **always runs in this strict order**:
+```
+auto-cleanup/
+├── bin/
+│   └── auto-cleanup              # Main entry point
+├── lib/
+│   ├── common.sh                 # Logging, config, utilities
+│   ├── exclusions.sh             # Exclusion list handling
+│   ├── kubernetes.sh             # kubectl wrappers
+│   └── cleanup.sh                # Cleanup logic
+├── conf/
+│   ├── auto-cleanup.conf         # Main configuration
+│   ├── exclude_namespaces.txt    # Namespace exclusions
+│   ├── exclude_deployments.txt   # Deployment exclusions
+│   ├── exclude_pods.txt          # Pod exclusions
+│   └── exclude_services.txt      # Service exclusions
+├── docs/                         # Documentation
+├── tests/                        # Test suite (planned)
+├── install.sh                    # Installation script
+├── uninstall.sh                  # Uninstallation script
+└── README.md
+```
+
+## Installation
+
+### Quick Install
+
+```bash
+# Clone the repository
+git clone <repository-url> auto-cleanup
+cd auto-cleanup
+
+# Install (requires root)
+sudo ./install.sh
+```
+
+### Installation Paths
+
+| Component | Path |
+|-----------|------|
+| Executable | `/opt/auto-cleanup/bin/auto-cleanup` |
+| Libraries | `/opt/auto-cleanup/lib/` |
+| Configuration | `/etc/auto-cleanup/` |
+| Logs | `/var/log/giindia/auto-cleanup/` |
+| Command | `/usr/local/bin/auto-cleanup` (symlink) |
+
+### Uninstallation
+
+```bash
+# Remove everything
+sudo ./uninstall.sh
+
+# Keep configuration
+sudo ./uninstall.sh --keep-config
+
+# Keep logs
+sudo ./uninstall.sh --keep-logs
+```
+
+## Configuration
+
+Edit `/etc/auto-cleanup/auto-cleanup.conf`:
+
+### Enable/Disable Resource Types
+
+```bash
+Deployment=True
+Pod=True
+Service=True
+```
+
+### Enable/Disable Limit Types
+
+```bash
+Deployment_HardLimit=True
+Deployment_SoftLimit=True
+
+Pod_HardLimit=True
+Pod_SoftLimit=True
+
+Service_HardLimit=True
+Service_SoftLimit=True
+```
+
+### Time Limits (Minutes)
+
+```bash
+# Student namespaces (dgx-s-*)
+STUDENT_SOFT=60
+STUDENT_HARD=1440
+
+# Faculty namespaces (dgx-f-*)
+FACULTY_SOFT=120
+FACULTY_HARD=2880
+
+# Industry namespaces (dgx-i-*)
+INDUSTRY_SOFT=60
+INDUSTRY_HARD=1440
+```
+
+### Pod Batch Deletion
+
+```bash
+POD_BATCH_SIZE=50           # Pods per kubectl command
+POD_FORCE_DELETE=false      # Use --force --grace-period=0
+POD_BACKGROUND_DELETE=true  # Don't wait for completion
+```
+
+## Deletion Logic
+
+### Execution Order
 
 1. **Deployments Cleanup**
-2. **Pods Cleanup (Batch-Queued Deletion)**
+2. **Pods Cleanup** (queued, then batch deleted)
 3. **Services Cleanup**
-4. **Exit & Unlock**
+4. **Exit & Release Lock**
 
-➡ No step blocks the next.
+### Hard Limit (Forced Delete)
 
----
+When `AGE >= HARD_LIMIT`:
+- Resource is **deleted immediately**
+- `keep-alive` label is **ignored**
 
-## 🔐 Script Locking (Cron-Safe)
+### Soft Limit (Conditional Delete)
 
-Only **one instance** of the script can run at a time.
-
-If another run starts while one is executing:
-- The new run exits immediately.
-- This prevents **overlapping cron deadlocks**.
-
----
-
-## 🗑️ Deletion Logic (Unified for All Resources)
-
-Each resource (Deployment / Pod / Service) follows:
-
-### 1️⃣ Hard Limit (Forced Delete)
-If:
-
-AGE ≥ HARD LIMIT
-
-Then:
-
-➡ `keep-alive` label is **ignored**
-
-➡ Resource is **deleted immediately**  
-
----
-
-### 2️⃣ Soft Limit (Conditional Delete)
-If:
-
-AGE ≥ SOFT LIMIT
-
-Then:
+When `AGE >= SOFT_LIMIT`:
 
 | keep-alive Label | Action |
 |------------------|--------|
-| Not present      | DELETE |
-| FALSE/False/false| DELETE |
-| TRUE/True/true   | SKIP   |
+| Not present | DELETE |
+| `false` | DELETE |
+| `true` | SKIP |
 
----
+### Below Soft Limit
 
-### 3️⃣ Below Soft Limit
+When `AGE < SOFT_LIMIT`:
+- Resource is **preserved**
 
-AGE < SOFT LIMIT
-
-➡ Resource is always **preserved**
-
----
-
-## ⚡ High-Performance Pod Deletion (Non-Blocking)
-
-Pods are **NOT deleted one-by-one**.
-
-Instead:
-
-1. All eligible **standalone pods** (pods without ownerReferences) are:
-   - Evaluated
-   - Queued into a memory array
-
-2. The script issues batched deletions:
-
-   kubectl delete pod pod1 pod2 pod3 ... -n <namespace>
-   
-3. Pods enter **Terminating state**
-
-4. Script **immediately proceeds to services**
-
-5. Script **does NOT wait for completion** (when background delete is enabled)
-
-✅ Eliminates **50+ minute deletion delays**
-
-✅ Safe for **hourly cron schedules**
-
-> **Note:** Only standalone pods (not managed by Deployments, ReplicaSets, Jobs, etc.) are processed. Pods with `ownerReferences` are automatically skipped.
-
----
-
-## 👥 User Categories & Policy Routing
+## User Categories
 
 Namespace prefix determines which limits apply:
 
-| Namespace Pattern | User Type  | Limits Used |
-|------------------|------------|-------------|
-| `dgx-s-*`        | Student    | `STUDENT_*` |
-| `dgx-f-*`        | Faculty    | `FACULTY_*` |
-| `dgx-i-*`        | Industry   | `INDUSTRY_*` |
+| Namespace Pattern | User Type | Limits Used |
+|-------------------|-----------|-------------|
+| `dgx-s-*` | Student | `STUDENT_*` |
+| `dgx-f-*` | Faculty | `FACULTY_*` |
+| `dgx-i-*` | Industry | `INDUSTRY_*` |
 
----
+## Label Protection
 
-## 🧾 Label-Based Protection
+Add this label to protect resources from soft-limit deletion:
 
-To protect any resource:
-
+```yaml
 metadata:
+  labels:
+    keep-alive: "true"
+```
 
- labels:
- 
-   keep-alive: "true"
+**Note:** Hard limit always overrides the label.
 
-➡ This protects it from **only under soft-limit conditions**.  
+## Exclusion Files
 
-➡ **Hard limit always overrides.**
-
----
-
-## ⛔ Exclusion System (Full Control)
-
-These files should be placed in the same directory as the script (optional - missing files are ignored):
+Edit files in `/etc/auto-cleanup/`:
 
 | File | Purpose |
-| --- | --- |
+|------|---------|
 | `exclude_namespaces.txt` | Skip entire namespaces |
 | `exclude_deployments.txt` | Skip specific deployments |
 | `exclude_pods.txt` | Skip specific pods |
 | `exclude_services.txt` | Skip specific services |
 
-### File Format
+Format: One name per line, comments start with `#`
 
-resource-name
+## Usage
 
-resource-name-2
+### Manual Execution
 
-➡ Comments are allowed
+```bash
+# Run with default settings
+sudo auto-cleanup
 
----
+# Quiet mode (errors only)
+sudo auto-cleanup --quiet
 
-## ⚙️ Configuration (`cleanup_config.env`)
+# Show version
+auto-cleanup --version
 
-### ✅ Enable / Disable Resource Types
+# Show help
+auto-cleanup --help
+```
 
-Deployment=True
+### Cron Setup
 
-Pod=True
+```bash
+# Run hourly
+echo '0 * * * * root /usr/local/bin/auto-cleanup' | sudo tee /etc/cron.d/auto-cleanup
+```
 
-Service=True
+## Development
 
----
+For development, run directly from the project directory:
 
-### ✅ Enable / Disable Hard / Soft Logic Per Resource
+```bash
+# Make executable
+chmod +x bin/auto-cleanup
 
-Deployment_HardLimit=True
+# Run (config loaded from conf/)
+sudo ./bin/auto-cleanup
+```
 
-Deployment_SoftLimit=True
+## Logging
 
+- **Location:** `/var/log/giindia/auto-cleanup/`
+- **Format:** `auto-cleanup-YYYY-MM-DD.log` (day-wise)
+- **Retention:** Configurable (default 30 days)
 
-Pod_HardLimit=True
+Example log entries:
 
-Pod_SoftLimit=True
+```
+[2025-12-12 10:30:00] [INFO] Starting Deployment cleanup...
+[2025-12-12 10:30:01] [INFO] Hard limit: deleting deployment train-job (dgx-s-user1) (age=1500m >= 1440m)
+[2025-12-12 10:30:02] [INFO] Pod debug-pod (dgx-f-admin) queued for SOFT deletion (keep-alive='')
+```
 
+## Safety Guarantees
 
-Service_HardLimit=True
+- **Lock-based execution:** Only one instance runs at a time
+- **Namespace exclusions:** Protected namespaces are never touched
+- **Resource exclusions:** Protected resources are never touched
+- **Non-blocking deletions:** Cluster doesn't freeze during mass deletions
+- **Standalone pods only:** Pods managed by controllers are skipped
 
-Service_SoftLimit=True
+## Best Practices
 
----
+1. **Test first:** Disable all resources, then enable gradually
+2. **Maintain exclusions:** Keep critical resources in exclusion files
+3. **Persistent logs:** Mount log directory to persistent storage
+4. **Monitor:** Check logs regularly for unexpected behavior
 
-### ✅ Time Limits (Minutes)
+## License
 
-# Students
-STUDENT_SOFT=2
+[Your License Here]
 
-STUDENT_HARD=30
+## Author
 
-
-# Faculty
-FACULTY_SOFT=2
-
-FACULTY_HARD=30
-
-
-# Industry
-INDUSTRY_SOFT=2
-
-INDUSTRY_HARD=10
-
----
-
-### ✅ Pod Batch Deletion Settings
-
-POD_FORCE_DELETE=false    # If true, uses --grace-period=0 --force
-
-POD_BACKGROUND_DELETE=true   # If true, runs deletion in background (non-blocking)
-
-POD_BATCH_SIZE=50   # Number of pods to delete per kubectl command
-
----
-
-### ✅ Logging Output
-
-LOG_FILE="/var/log/giindia/auto_cleanup_logs/auto_cleanup.log"
-
----
-
-## 📝 Logging Behavior
-
-Every action is:
-
--   ✅ Logged to file
-    
--   ✅ Echoed to terminal
-    
--   ✅ Timestamped
-    
-
-Examples:
-
-Pod user-pod-1 (dgx-s-1): keep-alive=false -> deleting (soft path)
-
-Deployment train-job (dgx-f-2): HARD delete triggered
-
-Service api-svc (dgx-i-1): safe/untouched
-
----
-
-## 🔁 Cron Job Example
-
-Run every hour:
-
-0 * * * * /bin/bash /path/to/auto-pod-deletion.sh
-
----
-
-## ✅ Safety Guarantees
-
--   No duplicate executions
-            
--   No skipped namespace touched
-    
--   No excluded resource touched
-    
--   No cluster freeze during mass deletions
-
----
-
-## 📌 Recommended Best Practices
-
--   Always test with:
-    
-    Service=False
-
-    Pod=False
-
-    Deployment=False
-    
--   Then enable resources gradually.
-    
--   Always maintain exclusion files.
-    
--   Always keep logs mounted to persistent storage.
+**Anubhav** - Global Infoventures  
+Email: anubhav.patrick@giindia.com

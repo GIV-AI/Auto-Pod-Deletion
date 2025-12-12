@@ -1,0 +1,19 @@
+# ============================================================================
+# Excluded Pods
+# ============================================================================
+# List pod names that should be excluded from cleanup.
+# These pods will not be deleted regardless of age.
+#
+# Format: One pod name per line
+# Comments: Lines starting with # are ignored
+# Whitespace: Leading/trailing whitespace is trimmed
+#
+# Note: This applies to standalone pods only. Pods managed by Deployments,
+# ReplicaSets, Jobs, etc. are automatically excluded from cleanup.
+#
+# Examples:
+#   long-running-job-pod
+#   debug-pod
+# ============================================================================
+
+

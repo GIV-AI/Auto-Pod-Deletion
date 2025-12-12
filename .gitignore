@@ -1,5 +1,21 @@
+# Cursor IDE
 .cursor/
 
 # Local development files
 TODO.md
-CLAUDE.md
+
+# Test artifacts
+tests/*.log
+tests/tmp/
+
+# Log files (should not be committed)
+*.log
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

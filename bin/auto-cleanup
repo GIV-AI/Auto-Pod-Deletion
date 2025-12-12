@@ -1,0 +1,229 @@
+#!/bin/bash
+# ============================================================================
+# Auto-Cleanup - Main Entry Point
+# ============================================================================
+# Kubernetes auto-cleanup tool for multi-user GPU clusters (DGX, HPC, academic
+# labs). Automatically deletes stale Deployments, Pods, and Services based on
+# configurable age limits with user-type policies.
+#
+# Usage:
+#   auto-cleanup [OPTIONS]
+#
+# Options:
+#   -h, --help      Show this help message
+#   -v, --version   Show version information
+#   -q, --quiet     Suppress non-error output (LOG_LEVEL=ERROR)
+#
+# Author: Anubhav <anubhav.patrick@giindia.com>
+# Organization: Global Infoventures
+# Date: 2025-12-12
+# ============================================================================
+
+set -o pipefail  # Exit if any command in pipeline fails
+
+# ============================================================================
+# VERSION
+# ============================================================================
+readonly VERSION="2.0.0"
+
+# ============================================================================
+# SCRIPT DIRECTORY RESOLUTION
+# ============================================================================
+# Handle symlinked scripts (e.g., from /usr/local/bin)
+if [[ -L "${BASH_SOURCE[0]}" ]]; then
+    REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+    SCRIPT_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# Library directory (relative to bin/)
+readonly LIB_DIR="${SCRIPT_DIR}/../lib"
+
+# ============================================================================
+# MODULE LOADING
+# ============================================================================
+# Load library modules with error handling
+
+# shellcheck source=../lib/common.sh
+source "${LIB_DIR}/common.sh" || {
+    echo "FATAL: Failed to load common.sh" >&2
+    exit 1
+}
+
+# shellcheck source=../lib/exclusions.sh
+source "${LIB_DIR}/exclusions.sh" || {
+    echo "FATAL: Failed to load exclusions.sh" >&2
+    exit 1
+}
+
+# shellcheck source=../lib/kubernetes.sh
+source "${LIB_DIR}/kubernetes.sh" || {
+    echo "FATAL: Failed to load kubernetes.sh" >&2
+    exit 1
+}
+
+# shellcheck source=../lib/cleanup.sh
+source "${LIB_DIR}/cleanup.sh" || {
+    echo "FATAL: Failed to load cleanup.sh" >&2
+    exit 1
+}
+
+# ============================================================================
+# HELP AND VERSION
+# ============================================================================
+show_help() {
+    cat << EOF
+Auto-Cleanup v${VERSION}
+
+Kubernetes auto-cleanup tool for multi-user GPU clusters.
+Automatically deletes stale Deployments, Pods, and Services based on
+configurable age limits with user-type policies.
+
+USAGE:
+    auto-cleanup [OPTIONS]
+
+OPTIONS:
+    -h, --help      Show this help message and exit
+    -v, --version   Show version information and exit
+    -q, --quiet     Suppress non-error output (set LOG_LEVEL=ERROR)
+
+CONFIGURATION:
+    Config file:    /etc/auto-cleanup/auto-cleanup.conf
+    Exclusions:     /etc/auto-cleanup/exclude_*.txt
+    Logs:           /var/log/giindia/auto-cleanup/
+
+For development, config is read from conf/ relative to script location.
+
+EXAMPLES:
+    # Run cleanup with default settings
+    auto-cleanup
+
+    # Run in quiet mode (errors only)
+    auto-cleanup --quiet
+
+    # Check version
+    auto-cleanup --version
+
+CRON SETUP:
+    # Run hourly
+    0 * * * * /usr/local/bin/auto-cleanup
+
+EOF
+}
+
+show_version() {
+    echo "Auto-Cleanup v${VERSION}"
+    echo "Common:     v${COMMON_VERSION:-unknown}"
+    echo "Exclusions: v${EXCLUSIONS_VERSION:-unknown}"
+    echo "Kubernetes: v${KUBERNETES_VERSION:-unknown}"
+    echo "Cleanup:    v${CLEANUP_VERSION:-unknown}"
+}
+
+# ============================================================================
+# ARGUMENT PARSING
+# ============================================================================
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -v|--version)
+            show_version
+            exit 0
+            ;;
+        -q|--quiet)
+            LOG_LEVEL="ERROR"
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# ============================================================================
+# CLEANUP HANDLER
+# ============================================================================
+cleanup() {
+    local exit_code=$?
+    release_lock
+    log_info "Auto-Cleanup completed. Releasing lock."
+    exit $exit_code
+}
+
+# Trap signals for cleanup
+trap cleanup EXIT INT TERM
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+main() {
+    echo "Auto-Cleanup (Deployments, Pods and Services) started..."
+
+    # --- DEPENDENCY CHECK ---
+    if ! check_dependencies; then
+        log_error "Dependency check failed"
+        exit 1
+    fi
+
+    # --- ACQUIRE LOCK ---
+    acquire_lock
+
+    # --- LOAD CONFIGURATION ---
+    if ! load_config; then
+        log_error "Failed to load configuration"
+        exit 1
+    fi
+
+    # --- INITIALIZE LOGGING ---
+    # Use LOG_DIR from config if set, otherwise default
+    if ! init_logging "${LOG_DIR:-/var/log/giindia/auto-cleanup}"; then
+        log_error "Failed to initialize logging"
+        exit 1
+    fi
+
+    # --- INITIALIZE EXCLUSION PATHS ---
+    # Determine base directory for exclusion files
+    local exclusion_dir
+    if [[ -d "/etc/auto-cleanup" ]]; then
+        exclusion_dir="/etc/auto-cleanup"
+    else
+        exclusion_dir="${SCRIPT_DIR}/../conf"
+    fi
+    init_exclusion_paths "$exclusion_dir"
+
+    # --- LOAD EXCLUSIONS ---
+    load_all_exclusions
+
+    # --- INITIALIZE LIMIT FLAGS ---
+    init_limit_flags
+
+    # --- PROCESS RESOURCES ---
+    # Order: Deployments → Pods → Services
+    # This order ensures dependent resources are cleaned up correctly
+
+    # 1. Process Deployments
+    process_deployments
+
+    # 2. Process Standalone Pods
+    process_pods
+
+    # 3. Flush Pod Deletion Queue (batched deletion)
+    flush_pod_queue
+
+    # 4. Process Services
+    process_services
+
+    echo "Auto-Cleanup (Deployments, Pods and Services) completed."
+}
+
+# Run main function
+main "$@"
+
