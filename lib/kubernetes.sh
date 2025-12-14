@@ -25,9 +25,9 @@ readonly KUBERNETES_VERSION="1.0.0"
 #   dgx-s-<username> = Student namespace
 #   dgx-f-<username> = Faculty namespace
 #   dgx-i-<company>  = Industry/partner namespace
-readonly NS_STUDENT_PREFIX="dgx-s"
-readonly NS_FACULTY_PREFIX="dgx-f"
-readonly NS_INDUSTRY_PREFIX="dgx-i"
+readonly NS_STUDENT_PREFIX="dgx-s-"
+readonly NS_FACULTY_PREFIX="dgx-f-"
+readonly NS_INDUSTRY_PREFIX="dgx-i-"
 
 # ----------------------------------------------------------------------------
 # get_user_type - Determine user type from namespace prefix
@@ -199,9 +199,9 @@ get_pods() {
     local ns_pattern="${1:-^dgx-}"
 
     # kubectl get pods output columns: NAMESPACE NAME READY STATUS RESTARTS AGE
-    # $5 = AGE column (differs from deployments due to extra columns)
+    # RESTARTS may contain spaces like "4 (26d ago)", so use $NF for AGE (last field)
     kubectl get pods -A --no-headers 2>/dev/null | \
-        awk -v pattern="$ns_pattern" '$1 ~ pattern {print $1, $2, $5}'
+        awk -v pattern="$ns_pattern" '$1 ~ pattern {print $1, $2, $NF}'
 }
 
 # ----------------------------------------------------------------------------
@@ -216,10 +216,10 @@ get_pods() {
 get_services() {
     local ns_pattern="${1:-^dgx-}"
 
-    # kubectl get svc output columns: NAMESPACE NAME TYPE CLUSTER-IP ... AGE
-    # $5 = AGE column
+    # kubectl get svc output columns: NAMESPACE NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
+    # AGE is always the last field, use $NF for reliability
     kubectl get svc -A --no-headers 2>/dev/null | \
-        awk -v pattern="$ns_pattern" '$1 ~ pattern {print $1, $2, $5}'
+        awk -v pattern="$ns_pattern" '$1 ~ pattern {print $1, $2, $NF}'
 }
 
 # ----------------------------------------------------------------------------
