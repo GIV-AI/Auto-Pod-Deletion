@@ -107,7 +107,7 @@ OPTIONS:
 
 CONFIGURATION:
     Config file:    /etc/auto-cleanup/auto-cleanup.conf
-    Exclusions:     /etc/auto-cleanup/exclude_*.txt
+    Exclusions:     /etc/auto-cleanup/exclude_*
     Logs:           /var/log/giindia/auto-cleanup/
 
 For development, config is read from conf/ relative to script location.

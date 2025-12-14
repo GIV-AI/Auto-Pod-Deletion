@@ -20,7 +20,7 @@ Consider using one of the following:
 | Module | Functions to Test |
 |--------|-------------------|
 | `common.sh` | `norm_flag()`, `log_message()`, `find_config()` |
-| `exclusions.sh` | `load_list()`, `in_list()`, `is_resource_excluded()` |
+| `exclusions.sh` | `load_list()`, `is_*_excluded()`, `is_resource_excluded()` |
 | `kubernetes.sh` | `get_user_type()`, `get_limits_for_namespace()`, `get_age_minutes()` |
 | `cleanup.sh` | `cleanup_resource()`, `flush_pod_queue()` |
 

@@ -26,10 +26,10 @@ auto-cleanup/
 │   └── cleanup.sh                # Cleanup logic
 ├── conf/
 │   ├── auto-cleanup.conf         # Main configuration
-│   ├── exclude_namespaces.txt    # Namespace exclusions
-│   ├── exclude_deployments.txt   # Deployment exclusions
-│   ├── exclude_pods.txt          # Pod exclusions
-│   └── exclude_services.txt      # Service exclusions
+│   ├── exclude_namespaces        # Namespace exclusions
+│   ├── exclude_deployments       # Deployment exclusions
+│   ├── exclude_pods              # Pod exclusions
+│   └── exclude_services          # Service exclusions
 ├── docs/                         # Documentation
 ├── tests/                        # Test suite (planned)
 ├── install.sh                    # Installation script
@@ -184,10 +184,10 @@ Edit files in `/etc/auto-cleanup/`:
 
 | File | Purpose |
 |------|---------|
-| `exclude_namespaces.txt` | Skip entire namespaces |
-| `exclude_deployments.txt` | Skip specific deployments |
-| `exclude_pods.txt` | Skip specific pods |
-| `exclude_services.txt` | Skip specific services |
+| `exclude_namespaces` | Skip entire namespaces |
+| `exclude_deployments` | Skip specific deployments |
+| `exclude_pods` | Skip specific pods |
+| `exclude_services` | Skip specific services |
 
 Format: One name per line, comments start with `#`
 

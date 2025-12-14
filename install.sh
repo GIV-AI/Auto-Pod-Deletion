@@ -158,7 +158,7 @@ else
 fi
 
 # Install exclusion files (always copy, they're just templates)
-for exclude_file in exclude_namespaces.txt exclude_deployments.txt exclude_pods.txt exclude_services.txt; do
+for exclude_file in exclude_namespaces exclude_deployments exclude_pods exclude_services; do
     if [[ -f "${CONFIG_DIR}/${exclude_file}" ]]; then
         log_warning "Exclusion file exists: ${exclude_file} (keeping existing)"
     else
@@ -215,7 +215,7 @@ echo "  Command:       ${SYMLINK_PATH}"
 echo ""
 echo "Quick start:"
 echo "  1. Edit configuration: sudo nano ${CONFIG_DIR}/auto-cleanup.conf"
-echo "  2. Add exclusions:     sudo nano ${CONFIG_DIR}/exclude_namespaces.txt"
+echo "  2. Add exclusions:     sudo nano ${CONFIG_DIR}/exclude_namespaces"
 echo "  3. Run manually:       sudo auto-cleanup"
 echo "  4. Check logs:         ls -la ${LOG_DIR}/"
 echo ""

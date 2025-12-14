@@ -11,6 +11,7 @@
 # ============================================================================
 
 # Guard against double-sourcing
+# -n is used to check if the variable is not empty
 [[ -n "$_EXCLUSIONS_SH_LOADED" ]] && return 0
 readonly _EXCLUSIONS_SH_LOADED=1
 
@@ -50,10 +51,10 @@ init_exclusion_paths() {
         fi
     fi
 
-    EX_NS_FILE="${base_dir}/exclude_namespaces.txt"
-    EX_DEPLOY_FILE="${base_dir}/exclude_deployments.txt"
-    EX_POD_FILE="${base_dir}/exclude_pods.txt"
-    EX_SVC_FILE="${base_dir}/exclude_services.txt"
+    EX_NS_FILE="${base_dir}/exclude_namespaces"
+    EX_DEPLOY_FILE="${base_dir}/exclude_deployments"
+    EX_POD_FILE="${base_dir}/exclude_pods"
+    EX_SVC_FILE="${base_dir}/exclude_services"
 }
 
 # ============================================================================
@@ -86,10 +87,13 @@ load_list() {
             # This strips inline comments: "value # comment" → "value "
             line="${line%%#*}"
 
-            # `sed -e 's/pattern/replacement/'` performs substitution.
-            # ^[[:space:]]* = Leading whitespace (spaces, tabs).
-            # [[:space:]]*$ = Trailing whitespace.
+            # Trim leading and trailing whitespace using sed.
+            # `sed -e 'expr'` applies expression; -e allows chaining multiple expressions.
+            # ^[[:space:]]* = Leading whitespace (spaces, tabs at start).
+            # [[:space:]]*$ = Trailing whitespace (spaces, tabs at end).
             # Both are replaced with empty string (trimmed).
+            # printf '%s' is used instead of echo to avoid issues with special characters
+            # (echo interprets -n, -e flags and backslashes inconsistently).
             line="$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
             # Skip empty lines (after comment/whitespace removal)
@@ -98,10 +102,57 @@ load_list() {
         done < "$file"
     fi
 
-    # Use eval to dynamically assign array to the variable named in $out_var.
-    # This is necessary because Bash doesn't support indirect array assignment.
-    # Example: if out_var="EX_NS", this executes: EX_NS=("${arr[@]}")
-    # shellcheck disable=SC2086 (intentional word splitting for array expansion)
+# ========================================================================
+    # INDIRECT ARRAY ASSIGNMENT VIA EVAL
+    # ========================================================================
+    # Problem: We need to assign array contents to a variable whose NAME
+    # is stored in another variable (indirection). Bash provides ${!var}
+    # for indirect READING, but has NO syntax for indirect WRITING to arrays.
+    #
+    # This fails:  ${!out_var}=("${arr[@]}")   # Invalid syntax
+    # This fails:  declare -n ref="$out_var"   # Works for scalars, not arrays in all Bash versions
+    #
+    # Solution: Use eval for two-pass execution.
+    #
+    # ---- HOW EVAL WORKS ----
+    # eval performs two passes:
+    #   Pass 1 (Expansion): Bash expands variables/escapes in the string
+    #   Pass 2 (Execution): Bash parses and runs the RESULT as a command
+    #
+    # ---- SYNTAX BREAKDOWN ----
+    # eval "$out_var=(\"\${arr[@]}\")"
+    #       ^^^^^^^^  ^^ ^^^^^^^^^^^ ^^
+    #       │         │  │           │
+    #       │         │  │           └─ Escaped quote → literal " in Pass 2
+    #       │         │  └─ Escaped $ → ${arr[@]} expands in Pass 2, not Pass 1
+    #       │         └─ Escaped quote → literal " in Pass 2
+    #       └─ Unescaped → expands NOW in Pass 1 to get target variable name
+    #
+    # ---- EXECUTION TRACE ----
+    # Given: out_var="EX_NS", arr=("kube-system" "default")
+    #
+    # Pass 1 - String after expansion:
+    #   EX_NS=("${arr[@]}")
+    #
+    # Pass 2 - Bash executes this as a command:
+    #   EX_NS=("kube-system" "default")
+    #
+    # ---- WHY THE ESCAPES MATTER ----
+    # \${arr[@]} : Delays expansion to Pass 2, preserving array structure.
+    #              Without \, Pass 1 would concatenate elements into one string.
+    #
+    # \"...\": Produces literal quotes in the output command.
+    #              Without them, elements with spaces would split incorrectly.
+    #              e.g., "my namespace" would become two elements: "my" "namespace"
+    #
+    # ---- SECURITY NOTE ----
+    # eval is safe here because:
+    #   1. $out_var is hardcoded by callers (EX_NS, EX_DEPLOY, etc.), not user input
+    #   2. ${arr[@]} contains sanitized lines from exclusion files (comments and
+    #      whitespace stripped, no shell metacharacters executed)
+    #
+    # shellcheck disable=SC2086
+    # SC2086 warns about word splitting; here we intentionally expand array elements
     eval "$out_var=(\"\${arr[@]}\")"
 }
 
@@ -131,21 +182,23 @@ load_all_exclusions() {
 # ============================================================================
 
 # ----------------------------------------------------------------------------
-# in_list - Check if a value exists in a list
+# _in_list - Check if a value exists in a list (internal helper)
 # Arguments:
 #   $1 - Value to search for
 #   $@ - List elements to search in (remaining arguments after shift)
 # Returns:
 #   0 if value is found in list, 1 otherwise
 # Example:
-#   if in_list "my-ns" "${EX_NS[@]}"; then echo "excluded"; fi
+#   if _in_list "my-ns" "${EX_NS[@]}"; then echo "excluded"; fi
 # Description:
 #   Performs exact string matching (not pattern/regex).
 #   Case-sensitive: "MyPod" != "mypod".
 # ----------------------------------------------------------------------------
-in_list() {
+_in_list() {
     local value="$1"
-    # `shift` removes $1, making $@ contain only the list elements.
+    # `shift` is a shell builtin that removes the first positional parameter ($1)
+    # and shifts all remaining parameters down by one ($2 becomes $1, $3 becomes $2, etc.).
+    # After shift, $@ contains only the list elements (the array passed to this function).
     shift
     local item
 
@@ -175,7 +228,7 @@ is_namespace_excluded() {
     local ns="$1"
     # ${EX_NS[@]:-} expands to array elements, or empty if array is unset.
     # The :- prevents "unbound variable" errors with set -u.
-    in_list "$ns" "${EX_NS[@]:-}"
+    _in_list "$ns" "${EX_NS[@]:-}"
 }
 
 # ----------------------------------------------------------------------------
@@ -187,7 +240,7 @@ is_namespace_excluded() {
 # ----------------------------------------------------------------------------
 is_deployment_excluded() {
     local name="$1"
-    in_list "$name" "${EX_DEPLOY[@]:-}"
+    _in_list "$name" "${EX_DEPLOY[@]:-}"
 }
 
 # ----------------------------------------------------------------------------
@@ -199,7 +252,7 @@ is_deployment_excluded() {
 # ----------------------------------------------------------------------------
 is_pod_excluded() {
     local name="$1"
-    in_list "$name" "${EX_POD[@]:-}"
+    _in_list "$name" "${EX_POD[@]:-}"
 }
 
 # ----------------------------------------------------------------------------
@@ -211,7 +264,7 @@ is_pod_excluded() {
 # ----------------------------------------------------------------------------
 is_service_excluded() {
     local name="$1"
-    in_list "$name" "${EX_SVC[@]:-}"
+    _in_list "$name" "${EX_SVC[@]:-}"
 }
 
 # ----------------------------------------------------------------------------
@@ -259,7 +312,9 @@ is_resource_excluded() {
                 return 0
             fi
             ;;
-        # No default case needed - unknown kinds are not excluded
+        *)
+            log_debug "Unknown resource kind '$kind' passed to is_resource_excluded, treating as not excluded"
+            ;;
     esac
 
     return 1
