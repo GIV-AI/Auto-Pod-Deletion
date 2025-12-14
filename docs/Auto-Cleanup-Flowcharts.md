@@ -517,7 +517,7 @@ flowchart LR
 
 ## Related Documentation
 
-- [Administrator Guide](Administrator%20Guide%20-%20Auto%20Cleanup%20(final).pdf) - Installation and configuration
+- [Administrator Guide](Administrator-Guide.md) - Installation and configuration
 - [README](../README.md) - Quick start and overview
 - [Configuration File](../conf/auto-cleanup.conf) - All configurable options
 
