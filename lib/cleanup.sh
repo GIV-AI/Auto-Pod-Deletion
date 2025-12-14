@@ -65,22 +65,22 @@ POD_BATCH_SIZE="${POD_BATCH_SIZE:-50}"             # Pods per kubectl command
 # ----------------------------------------------------------------------------
 init_limit_flags() {
     # Normalize resource enable flags from config.
-    # ${Deployment:-False} uses the Deployment config variable or "False" if unset.
+    # ${Deployment:-false} uses the Deployment config variable or "false" if unset.
     # norm_flag() converts various boolean representations to "true"/"false".
     local deployment_flag pod_flag service_flag
-    deployment_flag="$(norm_flag "${Deployment:-False}")"
-    pod_flag="$(norm_flag "${Pod:-False}")"
-    service_flag="$(norm_flag "${Service:-False}")"
+    deployment_flag="$(norm_flag "${Deployment:-false}")"
+    pod_flag="$(norm_flag "${Pod:-false}")"
+    service_flag="$(norm_flag "${Service:-false}")"
 
     # Normalize limit flags per resource type
-    DEPLOY_HARD_FLAG="$(norm_flag "${Deployment_HardLimit:-False}")"
-    DEPLOY_SOFT_FLAG="$(norm_flag "${Deployment_SoftLimit:-False}")"
+    DEPLOY_HARD_FLAG="$(norm_flag "${Deployment_HardLimit:-false}")"
+    DEPLOY_SOFT_FLAG="$(norm_flag "${Deployment_SoftLimit:-false}")"
 
-    POD_HARD_FLAG="$(norm_flag "${Pod_HardLimit:-False}")"
-    POD_SOFT_FLAG="$(norm_flag "${Pod_SoftLimit:-False}")"
+    POD_HARD_FLAG="$(norm_flag "${Pod_HardLimit:-false}")"
+    POD_SOFT_FLAG="$(norm_flag "${Pod_SoftLimit:-false}")"
 
-    SERVICE_HARD_FLAG="$(norm_flag "${Service_HardLimit:-False}")"
-    SERVICE_SOFT_FLAG="$(norm_flag "${Service_SoftLimit:-False}")"
+    SERVICE_HARD_FLAG="$(norm_flag "${Service_HardLimit:-false}")"
+    SERVICE_SOFT_FLAG="$(norm_flag "${Service_SoftLimit:-false}")"
 
     # If both hard & soft are disabled, disable the resource entirely.
     # This prevents unnecessary kubectl queries for resources with no active limits.
@@ -108,10 +108,12 @@ init_limit_flags() {
     # grep -E = Extended regex, -q = Quiet mode (no output, just exit status).
     # ^[0-9]+$ = String containing only digits (positive integer).
     if ! printf '%s' "$POD_BATCH_SIZE" | grep -Eq '^[0-9]+$'; then
+        log_warning "POD_BATCH_SIZE='$POD_BATCH_SIZE' is not a valid integer, defaulting to 50"
         POD_BATCH_SIZE=50
     fi
     # -le = Less than or equal (arithmetic comparison)
     if [[ "$POD_BATCH_SIZE" -le 0 ]]; then
+        log_warning "POD_BATCH_SIZE='$POD_BATCH_SIZE' must be greater than 0, defaulting to 50"
         POD_BATCH_SIZE=50
     fi
 
@@ -161,6 +163,7 @@ cleanup_resource() {
             soft_flag="$SERVICE_SOFT_FLAG"
             ;;
         *)
+            log_warning "cleanup_resource called with unknown kind='$kind' for $name ($ns) -> skipping"
             return 0
             ;;
     esac
@@ -195,6 +198,7 @@ cleanup_resource() {
 
         # Get keep-alive label value from Kubernetes resource metadata.
         # tr '[:upper:]' '[:lower:]' converts to lowercase for case-insensitive compare.
+        # keep_alive = raw label value, keep_lc = lowercase version for comparison.
         local keep_alive keep_lc
         keep_alive="$(get_keep_alive_label "$kind" "$name" "$ns")"
         keep_lc="$(printf '%s' "$keep_alive" | tr '[:upper:]' '[:lower:]')"
@@ -229,6 +233,30 @@ cleanup_resource() {
 # POD QUEUE MANAGEMENT
 # ============================================================================
 
+# ============================================================================
+# POD BATCH DELETION STRATEGY
+# ============================================================================
+# The pod deletion system uses TWO optimizations working together:
+#
+# 1. INTRA-NAMESPACE BATCHING (Reduces API calls)
+#    - All pods belonging to the SAME namespace are grouped together
+#    - Deleted using a SINGLE kubectl command: kubectl delete pod p1 p2 p3 -n ns
+#    - Example: 50 pods in dgx-s-user1 = 1 kubectl command (not 50)
+#
+# 2. INTER-NAMESPACE PARALLELISM (Reduces total time)
+#    - Each namespace's deletion runs in the BACKGROUND (nohup ... &)
+#    - Multiple namespaces are processed SIMULTANEOUSLY, not sequentially
+#    - Example: 10 namespaces = 10 parallel kubectl commands
+#
+# Combined Effect:
+#    - 100 pods across 5 namespaces (20 each) = 5 parallel commands
+#    - 100 pods in 1 namespace = 1 command (batched)
+#    - 100 pods across 100 namespaces = 100 parallel commands (worst case)
+#
+# Even in the worst case, background execution ensures all deletions run
+# in parallel, completing in roughly the time of a single deletion.
+# ============================================================================
+
 # ----------------------------------------------------------------------------
 # flush_pod_queue - Process and delete all queued pods in batches
 # Description:
@@ -252,7 +280,10 @@ flush_pod_queue() {
 
     for item in "${POD_DELETE_QUEUE[@]:-}"; do
         # Skip empty entries (:-} provides empty default if array is unset)
-        [[ -z "$item" ]] && continue
+        if [[ -z "$item" ]]; then
+            log_warning "Skipping empty entry in pod deletion queue"
+            continue
+        fi
 
         # Parse "namespace/podname" format using parameter expansion.
         # ${item%%/*} = Remove longest match of /* from end (keeps namespace).
@@ -262,19 +293,26 @@ flush_pod_queue() {
         local pod="${item##*/}"
 
         # Skip malformed entries (e.g., missing / separator)
-        [[ -z "$ns" || -z "$pod" ]] && continue
+        # Check if "/" is present in the entry; without it, parsing fails
+        if [[ "$item" != *"/"* || -z "$ns" || -z "$pod" ]]; then
+            log_warning "Skipping malformed pod queue entry: '$item' (expected format: namespace/podname)"
+            continue
+        fi
 
         # Append pod to namespace group (space-separated list).
         # ${PODS_BY_NS[$ns]:-} returns empty string if key doesn't exist.
         if [[ -z "${PODS_BY_NS[$ns]:-}" ]]; then
             PODS_BY_NS["$ns"]="$pod"
         else
-            PODS_BY_NS["$ns"]="${PODS_BY_NS[$ns]} $pod"
+            # Append pod to the existing list for this namespace;
+            # this ensures all pods for the namespace are grouped together for batching.
+            PODS_BY_NS["$ns"]+=" $pod"
         fi
     done
 
     # Process each namespace.
     # ${!array[@]} returns all keys of an associative array.
+    # ${array[@]} returns all values of an associative array.
     for ns in "${!PODS_BY_NS[@]}"; do
         # Convert space-separated list to array.
         # `read -r -a array` reads words into array elements.
@@ -359,14 +397,32 @@ process_deployments() {
     # < <(cmd) is process substitution (avoids subshell variable scope issues).
     while read -r ns name _; do
         # Skip empty lines or malformed input
-        [[ -z "$ns" || -z "$name" ]] && continue
+        if [[ -z "$ns" || -z "$name" ]]; then
+            log_debug "Skipping malformed deployment entry (ns='$ns', name='$name')"
+            continue
+        fi
+
+        # Apply exclusion filters early to avoid unnecessary kubectl calls.
+        # Check order: namespace first (cheaper), then specific deployment name.
+        if is_namespace_excluded "$ns"; then
+            log_debug "Skipping deployment $name ($ns) -> namespace excluded"
+            continue
+        fi
+
+        if is_deployment_excluded "$name"; then
+            log_debug "Skipping deployment $name ($ns) -> explicitly excluded"
+            continue
+        fi
 
         local age_min limits soft hard
         age_min="$(get_age_minutes deployment "$name" "$ns")"
         limits="$(get_limits_for_namespace "$ns")"
 
         # Skip if limits unavailable (namespace doesn't match dgx-s/f/i OR config missing)
-        [[ -z "$limits" ]] && continue
+        if [[ -z "$limits" ]]; then
+            log_debug "No limits configured for namespace '$ns' -> skipping deployment $name"
+            continue
+        fi
 
         # <<< is a here-string: "soft hard" becomes stdin for read.
         read -r soft hard <<< "$limits"
@@ -394,7 +450,10 @@ process_pods() {
     # Process pods line by line from get_pods output.
     # Pods are queued (not deleted immediately) for batch processing.
     while read -r ns name _; do
-        [[ -z "$ns" || -z "$name" ]] && continue
+        if [[ -z "$ns" || -z "$name" ]]; then
+            log_debug "Skipping malformed pod entry (ns='$ns', name='$name')"
+            continue
+        fi
 
         # Apply exclusion filters early to avoid unnecessary kubectl calls.
         # Check order: namespace first (cheaper), then specific pod name.
@@ -412,6 +471,7 @@ process_pods() {
         # Managed pods (from Deployments, Jobs, etc.) are handled by their controllers.
         # `!` negates the return value: continue if pod IS managed.
         if ! is_standalone_pod "$name" "$ns"; then
+            log_debug "Skipping pod $name ($ns) -> managed by controller (has owner references)"
             continue
         fi
 
@@ -420,7 +480,10 @@ process_pods() {
         limits="$(get_limits_for_namespace "$ns")"
 
         # Skip if limits unavailable (namespace doesn't match dgx-s/f/i OR config missing)
-        [[ -z "$limits" ]] && continue
+        if [[ -z "$limits" ]]; then
+            log_debug "No limits configured for namespace '$ns' -> skipping pod $name"
+            continue
+        fi
 
         read -r soft hard <<< "$limits"
         cleanup_resource "pod" "$age_min" "$name" "$ns" "$soft" "$hard"
@@ -447,14 +510,32 @@ process_services() {
     # Services are deleted immediately (not batched like pods).
     # Services are independent of pods/deployments and can be cleaned up anytime.
     while read -r ns name _; do
-        [[ -z "$ns" || -z "$name" ]] && continue
+        if [[ -z "$ns" || -z "$name" ]]; then
+            log_debug "Skipping malformed service entry (ns='$ns', name='$name')"
+            continue
+        fi
+
+        # Apply exclusion filters early to avoid unnecessary kubectl calls.
+        # Check order: namespace first (cheaper), then specific service name.
+        if is_namespace_excluded "$ns"; then
+            log_debug "Skipping service $name ($ns) -> namespace excluded"
+            continue
+        fi
+
+        if is_service_excluded "$name"; then
+            log_debug "Skipping service $name ($ns) -> explicitly excluded"
+            continue
+        fi
 
         local age_min limits soft hard
         age_min="$(get_age_minutes service "$name" "$ns")"
         limits="$(get_limits_for_namespace "$ns")"
 
         # Skip if limits unavailable (namespace doesn't match dgx-s/f/i OR config missing)
-        [[ -z "$limits" ]] && continue
+        if [[ -z "$limits" ]]; then
+            log_debug "No limits configured for namespace '$ns' -> skipping service $name"
+            continue
+        fi
 
         read -r soft hard <<< "$limits"
         cleanup_resource "service" "$age_min" "$name" "$ns" "$soft" "$hard"

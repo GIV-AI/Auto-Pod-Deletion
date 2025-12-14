@@ -120,10 +120,19 @@ Examples: `30M` = 30 minutes, `2H` = 2 hours (120 minutes), `30` = 30 minutes
 
 ### Pod Batch Deletion
 
+The pod deletion system uses a **dual optimization strategy**:
+
+| Optimization | What It Does | Benefit |
+|--------------|--------------|---------|
+| **Intra-namespace batching** | Pods in the same namespace are combined into a single `kubectl delete` command | Reduces API calls (50 pods = 1 call, not 50) |
+| **Inter-namespace parallelism** | Each namespace's deletion runs in background (`nohup ... &`) | Multiple namespaces delete simultaneously |
+
+**Example:** 100 pods across 5 namespaces (20 pods each) results in just **5 parallel kubectl commands**, not 100 sequential ones.
+
 ```bash
-POD_BATCH_SIZE=50           # Pods per kubectl command
+POD_BATCH_SIZE=50           # Max pods per kubectl command
 POD_FORCE_DELETE=false      # Use --force --grace-period=0
-POD_BACKGROUND_DELETE=true  # Don't wait for completion
+POD_BACKGROUND_DELETE=true  # Enable parallel namespace processing
 ```
 
 ## Deletion Logic
