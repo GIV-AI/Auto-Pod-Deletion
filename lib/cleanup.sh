@@ -539,7 +539,25 @@ process_pods() {
         # Managed pods (from Deployments, Jobs, etc.) are handled by their controllers.
         # `!` negates the return value: continue if pod IS managed.
         if ! is_standalone_pod "$name" "$ns"; then
-            log_debug "Skipping pod $name ($ns) -> managed by controller (has owner references)"
+            # Get controller type for informative logging
+            local owner_kind
+            owner_kind="$(get_pod_owner_kind "$name" "$ns")"
+
+            # Different log levels based on controller type:
+            # - ReplicaSet: DEBUG (expected, Deployments are cleaned separately)
+            # - Others: INFO (helps identify workload types that might need cleanup policies)
+            case "$owner_kind" in
+                ReplicaSet)
+                    log_debug "Skipping pod $name ($ns) -> managed by $owner_kind (Deployment cleanup handles these)"
+                    ;;
+                Job|CronJob|StatefulSet|DaemonSet|ReplicationController)
+                    log_info "Skipping pod $name ($ns) -> managed by $owner_kind controller (not cleaned by this script)"
+                    ;;
+                *)
+                    # Custom controllers, operators, or unknown types
+                    log_info "Skipping pod $name ($ns) -> managed by ${owner_kind:-unknown} controller (custom/operator workload)"
+                    ;;
+            esac
             continue
         fi
 

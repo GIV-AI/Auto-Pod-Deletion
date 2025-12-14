@@ -291,6 +291,28 @@ get_services() {
 }
 
 # ----------------------------------------------------------------------------
+# get_pod_owner_kind - Get the controller kind that owns this pod
+# Arguments:
+#   $1 - Pod name
+#   $2 - Namespace
+# Returns:
+#   Prints owner kind (ReplicaSet, StatefulSet, Job, DaemonSet, etc.) or empty
+# Description:
+#   Extracts the kind of the controller that owns this pod. Returns empty if
+#   pod is standalone (no owner). For pods with multiple owners, returns the
+#   first owner kind.
+# ----------------------------------------------------------------------------
+get_pod_owner_kind() {
+    local name="$1"
+    local ns="$2"
+
+    # Extract the first owner's kind from ownerReferences array.
+    # [0].kind gets the kind field from the first owner reference.
+    kubectl get pod "$name" -n "$ns" \
+        -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || echo ""
+}
+
+# ----------------------------------------------------------------------------
 # is_standalone_pod - Check if pod has no owner references (standalone)
 # Arguments:
 #   $1 - Pod name
@@ -309,7 +331,7 @@ is_standalone_pod() {
     local owner
 
     # -o jsonpath extracts specific fields from the JSON response.
-    # .metadata.ownerReferences is an array of owner resources.
+    # .metadata.ownerReferences is an array of owner references.
     # Empty array [] or missing field = standalone pod.
     owner="$(kubectl get pod "$name" -n "$ns" \
         -o jsonpath='{.metadata.ownerReferences}' 2>/dev/null || echo "")"
