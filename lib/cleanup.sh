@@ -365,7 +365,7 @@ process_deployments() {
         age_min="$(get_age_minutes deployment "$name" "$ns")"
         limits="$(get_limits_for_namespace "$ns")"
 
-        # Skip if namespace doesn't match any user-type pattern (dgx-s/f/i)
+        # Skip if limits unavailable (namespace doesn't match dgx-s/f/i OR config missing)
         [[ -z "$limits" ]] && continue
 
         # <<< is a here-string: "soft hard" becomes stdin for read.
@@ -419,7 +419,7 @@ process_pods() {
         age_min="$(get_age_minutes pod "$name" "$ns")"
         limits="$(get_limits_for_namespace "$ns")"
 
-        # Skip if namespace doesn't match any user-type pattern (dgx-s/f/i)
+        # Skip if limits unavailable (namespace doesn't match dgx-s/f/i OR config missing)
         [[ -z "$limits" ]] && continue
 
         read -r soft hard <<< "$limits"
@@ -453,7 +453,7 @@ process_services() {
         age_min="$(get_age_minutes service "$name" "$ns")"
         limits="$(get_limits_for_namespace "$ns")"
 
-        # Skip if namespace doesn't match any user-type pattern (dgx-s/f/i)
+        # Skip if limits unavailable (namespace doesn't match dgx-s/f/i OR config missing)
         [[ -z "$limits" ]] && continue
 
         read -r soft hard <<< "$limits"

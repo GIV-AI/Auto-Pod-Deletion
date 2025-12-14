@@ -176,6 +176,35 @@ metadata:
     keep-alive: "true"
 ```
 
+### Adding Label to Running Resources
+
+To add the `keep-alive` label to an already running pod without stopping or restarting it:
+
+```bash
+# Add keep-alive label to a running pod
+kubectl label pod <pod-name> -n <namespace> keep-alive=true
+
+# Example: Protect a pod named "training-job" in namespace "dgx-s-user1"
+kubectl label pod training-job -n dgx-s-user1 keep-alive=true
+```
+
+If the label already exists and you need to update it:
+
+```bash
+# Overwrite an existing label
+kubectl label pod <pod-name> -n <namespace> keep-alive=true --overwrite
+```
+
+The same approach works for Deployments and Services:
+
+```bash
+# For Deployments
+kubectl label deployment <deployment-name> -n <namespace> keep-alive=true
+
+# For Services
+kubectl label service <service-name> -n <namespace> keep-alive=true
+```
+
 **Note:** Hard limit always overrides the label.
 
 ## Exclusion Files
