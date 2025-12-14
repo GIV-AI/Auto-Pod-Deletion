@@ -23,3 +23,7 @@ tests/tmp/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Pull Request files
+create-pr.md
+PULL_REQUEST.md
