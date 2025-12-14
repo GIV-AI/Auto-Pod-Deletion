@@ -340,7 +340,7 @@ During Pod cleanup, only standalone pods are processed. Pods managed by the foll
 
 ## License
 
-[Your License Here]
+MIT License
 
 ## Author
 
