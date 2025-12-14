@@ -24,15 +24,29 @@ A Kubernetes resource cleanup tool for multi-user DGX clusters. Automatically de
 The Auto-Cleanup script automatically removes stale Kubernetes resources (Deployments, Pods, and Services) from DGX cluster namespaces. This prevents resource hoarding and ensures fair access for all users.
 
 **What gets cleaned up:**
-- Deployments older than the configured limit
-- Standalone Pods (not managed by Deployments/Jobs) older than the configured limit
+- Deployments older than the configured limit (and their managed pods automatically)
+- Standalone Pods older than the configured limit
 - Services older than the configured limit
 
 **What is NOT touched:**
 - Resources in excluded namespaces
 - Resources with names in exclusion lists
-- Pods managed by controllers (Deployments, ReplicaSets, Jobs, etc.)
 - Resources protected by the `keep-alive=true` label (within soft limit)
+
+### Pods That Are Never Deleted
+
+During Pod cleanup, the script only processes **standalone pods** (pods without `ownerReferences`). Pods managed by the following controllers are **skipped**:
+
+| Controller Type | Example Workload |
+|----------------|------------------|
+| **Job** | Batch processing, data migrations |
+| **CronJob** | Scheduled backups, periodic reports |
+| **StatefulSet** | Databases, message queues |
+| **DaemonSet** | Logging agents, node monitors |
+| **ReplicationController** | Legacy workloads |
+| **Custom Controllers/Operators** | ML frameworks, custom CRDs |
+
+**Note:** Pods managed by Deployments (via ReplicaSets) are not directly deleted during Pod cleanup—instead, when a Deployment is deleted, Kubernetes automatically terminates all its managed pods.
 
 ---
 

@@ -311,7 +311,25 @@ Example log entries:
 - **Namespace exclusions:** Protected namespaces are never touched
 - **Resource exclusions:** Protected resources are never touched
 - **Non-blocking deletions:** Cluster doesn't freeze during mass deletions
-- **Standalone pods only:** Pods managed by controllers are skipped
+- **Controller-managed pods protected:** Pods owned by Jobs, CronJobs, StatefulSets, DaemonSets, or custom operators are never deleted
+
+### What Gets Deleted
+
+| Resource Type | What Is Deleted |
+|---------------|-----------------|
+| **Deployments** | Deleted based on age limits (managed pods terminate automatically) |
+| **Pods** | Only standalone pods (no controller owner) are deleted |
+| **Services** | Deleted based on age limits |
+
+### Pods That Are Never Deleted
+
+During Pod cleanup, only standalone pods are processed. Pods managed by the following controllers are **skipped**:
+
+- **Job / CronJob** - Batch and scheduled workloads
+- **StatefulSet** - Stateful applications (databases, queues)
+- **DaemonSet** - Node-level daemons
+- **ReplicationController** - Legacy workloads
+- **Custom Controllers/Operators** - Operator-managed pods
 
 ## Best Practices
 
