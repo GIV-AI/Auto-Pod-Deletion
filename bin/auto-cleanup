@@ -6,6 +6,19 @@
 # labs). Automatically deletes stale Deployments, Pods, and Services based on
 # configurable age limits with user-type policies.
 #
+# Pod Cleanup Behavior:
+#   - Only processes standalone pods (pods without ownerReferences), deployments and services
+#   - Pods managed by Deployments (via ReplicaSets) are not directly deleted
+#     during Pod cleanup. Instead, when a Deployment is deleted, Kubernetes
+#     automatically terminates all its managed pods.
+#   - Pods managed by the following controllers are NEVER deleted:
+#     * Job (batch processing, data migrations)
+#     * CronJob (scheduled backups, periodic reports)
+#     * StatefulSet (databases, message queues)
+#     * DaemonSet (logging agents, node monitors)
+#     * ReplicationController (legacy workloads)
+#     * Custom Controllers/Operators (ML frameworks, custom CRDs)
+#
 # Usage:
 #   auto-cleanup [OPTIONS]
 #
