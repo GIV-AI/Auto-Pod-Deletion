@@ -15,7 +15,8 @@
 [[ -n "$_CLEANUP_SH_LOADED" ]] && return 0
 readonly _CLEANUP_SH_LOADED=1
 
-# Module version
+# Module version (used by show_version() in main script)
+# shellcheck disable=SC2034
 readonly CLEANUP_VERSION="1.0.0"
 
 # ============================================================================
@@ -49,9 +50,14 @@ declare -a POD_DELETE_QUEUE=()
 # Pod deletion behavior settings (with defaults).
 # ${VAR:-default} syntax: Use VAR if set and non-empty, otherwise use default.
 # These can be overridden by the config file.
-POD_FORCE_DELETE="${POD_FORCE_DELETE:-false}"      # Use --grace-period=0 --force
+POD_FORCE_DELETE="${POD_FORCE_DELETE:-false}"           # Use --grace-period=0 --force
 POD_BACKGROUND_DELETE="${POD_BACKGROUND_DELETE:-true}"  # Run kubectl in background
-POD_BATCH_SIZE="${POD_BATCH_SIZE:-50}"             # Pods per kubectl command
+POD_BATCH_SIZE="${POD_BATCH_SIZE:-50}"                  # Pods per kubectl command
+
+# Concurrency and timeout protection (prevents resource exhaustion and deadlocks)
+MAX_CONCURRENT_DELETES="${MAX_CONCURRENT_DELETES:-10}"  # Max parallel kubectl processes
+KUBECTL_TIMEOUT="${KUBECTL_TIMEOUT:-300}"               # Timeout per kubectl command (seconds)
+WAIT_LOOP_TIMEOUT="${WAIT_LOOP_TIMEOUT:-600}"           # Timeout for job slot wait (seconds)
 
 # ============================================================================
 # INITIALIZATION
@@ -351,18 +357,80 @@ flush_pod_queue() {
             # ${batch[*]} expands array elements as single string (space-separated).
             log_info "Deleting pods in batch (namespace=$ns): ${batch[*]} (force=$POD_FORCE_DELETE background=$POD_BACKGROUND_DELETE)"
 
-            # Execute deletion
+            # Execute deletion with timeout and concurrency control
             if [[ "$POD_BACKGROUND_DELETE" == "true" ]]; then
-                # `nohup` runs command immune to hangup signals (SIGHUP).
-                # Prevents kubectl from terminating if parent shell exits.
-                # & at end runs command in background (non-blocking).
-                # Output redirected to LOG_FILE to capture any errors.
-                nohup "${cmd[@]}" >> "$LOG_FILE" 2>&1 &
+                # ============================================================
+                # CONCURRENCY CONTROL WITH DEADLOCK PREVENTION
+                # ============================================================
+                # Wait for an available job slot before starting new background process.
+                # This prevents spawning hundreds of kubectl processes simultaneously,
+                # which could exhaust system resources or overwhelm the API server.
+                #
+                # Deadlock Protection:
+                # If kubectl processes hang (network issues, stuck pods, API problems),
+                # the loop could wait indefinitely. WAIT_LOOP_TIMEOUT provides an escape
+                # hatch - after waiting too long, we log an error and proceed anyway
+                # to prevent complete script deadlock.
+
+                local wait_start
+                wait_start=$(date +%s)
+
+                # jobs -r -p = List PIDs of running background jobs started by this shell
+                #   -r = only Running jobs (excludes stopped/suspended)
+                #   -p = output PIDs only (one per line)
+                # wc -l = count the number of lines (= number of running jobs)
+                while [[ "$(jobs -r -p | wc -l)" -ge "$MAX_CONCURRENT_DELETES" ]]; do
+                    local elapsed=$(( $(date +%s) - wait_start ))
+
+                    # Safety escape: If we've been waiting too long, something is wrong
+                    if [[ $elapsed -ge $WAIT_LOOP_TIMEOUT ]]; then
+                        log_error "Timeout waiting for job slots after ${elapsed}s (limit=${WAIT_LOOP_TIMEOUT}s)"
+                        log_error "Some kubectl delete processes may be hung - check for stuck pods or API server issues"
+                        log_warning "Proceeding anyway to avoid complete deadlock (may exceed MAX_CONCURRENT_DELETES=${MAX_CONCURRENT_DELETES})"
+                        break  # Exit wait loop, accept risk of exceeding concurrency limit
+                    fi
+
+                    # Sleep briefly before checking again (reduces CPU usage in tight loop)
+                    sleep 0.5
+                done
+
+                # ============================================================
+                # BACKGROUND EXECUTION WITH TIMEOUT PROTECTION
+                # ============================================================
+                # `timeout` command kills the process if it runs longer than KUBECTL_TIMEOUT.
+                # This prevents kubectl from hanging indefinitely due to:
+                #   - Network timeouts
+                #   - API server unresponsiveness
+                #   - Pods stuck in Terminating state with finalizers
+                #   - etcd performance issues
+                #
+                # timeout exits with:
+                #   124 if the command timed out
+                #   The command's exit code otherwise
+                #
+                # & at end runs in background (non-blocking)
+                # Output redirected to LOG_FILE to capture errors and timeout messages
+
+                timeout "$KUBECTL_TIMEOUT" "${cmd[@]}" >> "$LOG_FILE" 2>&1 &
+                local pid=$!
+
+                log_debug "Started background deletion (PID=$pid, timeout=${KUBECTL_TIMEOUT}s, concurrent=$(jobs -r -p | wc -l)/${MAX_CONCURRENT_DELETES}) for namespace=$ns"
             else
-                # Run synchronously (blocking) - wait for kubectl to complete.
-                # || is OR - runs log_error only if kubectl returns non-zero.
-                "${cmd[@]}" >> "$LOG_FILE" 2>&1 || \
-                    log_error "kubectl delete returned non-zero for pods (${batch[*]}) in ns=$ns"
+                # ============================================================
+                # SYNCHRONOUS EXECUTION WITH TIMEOUT PROTECTION
+                # ============================================================
+                # Run kubectl synchronously (blocking) with timeout protection.
+                # Even in synchronous mode, timeout prevents indefinite hangs.
+                # || is OR - runs log_error only if kubectl returns non-zero (including timeout=124).
+
+                timeout "$KUBECTL_TIMEOUT" "${cmd[@]}" >> "$LOG_FILE" 2>&1 || {
+                    local exit_code=$?
+                    if [[ $exit_code -eq 124 ]]; then
+                        log_error "kubectl delete TIMED OUT after ${KUBECTL_TIMEOUT}s for pods (${batch[*]}) in ns=$ns"
+                    else
+                        log_error "kubectl delete returned exit code $exit_code for pods (${batch[*]}) in ns=$ns"
+                    fi
+                }
             fi
         done
     done

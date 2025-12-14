@@ -161,7 +161,8 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         -q|--quiet)
-            LOG_LEVEL="ERROR"
+            # Export LOG_LEVEL for use in logging functions
+            export LOG_LEVEL="ERROR"
             shift
             ;;
         -*)

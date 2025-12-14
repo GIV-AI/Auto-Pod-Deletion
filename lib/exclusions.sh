@@ -15,7 +15,8 @@
 [[ -n "$_EXCLUSIONS_SH_LOADED" ]] && return 0
 readonly _EXCLUSIONS_SH_LOADED=1
 
-# Module version
+# Module version (used by show_version() in main script)
+# shellcheck disable=SC2034
 readonly EXCLUSIONS_VERSION="1.0.0"
 
 # ============================================================================

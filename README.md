@@ -120,20 +120,45 @@ Examples: `30M` = 30 minutes, `2H` = 2 hours (120 minutes), `30` = 30 minutes
 
 ### Pod Batch Deletion
 
-The pod deletion system uses a **dual optimization strategy**:
+The pod deletion system uses a **dual optimization strategy** with **safety controls**:
 
 | Optimization | What It Does | Benefit |
 |--------------|--------------|---------|
 | **Intra-namespace batching** | Pods in the same namespace are combined into a single `kubectl delete` command | Reduces API calls (50 pods = 1 call, not 50) |
-| **Inter-namespace parallelism** | Each namespace's deletion runs in background (`nohup ... &`) | Multiple namespaces delete simultaneously |
+| **Inter-namespace parallelism** | Each namespace's deletion runs in background with concurrency limits | Multiple namespaces delete simultaneously without overwhelming the system |
 
 **Example:** 100 pods across 5 namespaces (20 pods each) results in just **5 parallel kubectl commands**, not 100 sequential ones.
+
+#### Basic Configuration
 
 ```bash
 POD_BATCH_SIZE=50           # Max pods per kubectl command
 POD_FORCE_DELETE=false      # Use --force --grace-period=0
 POD_BACKGROUND_DELETE=true  # Enable parallel namespace processing
 ```
+
+#### Concurrency and Timeout Controls
+
+To prevent resource exhaustion and deadlocks when processing large numbers of pods:
+
+```bash
+# Limit concurrent kubectl processes (prevents process explosion)
+MAX_CONCURRENT_DELETES=10   # Max parallel kubectl delete processes (default: 10)
+
+# Timeout protection (prevents hung processes)
+KUBECTL_TIMEOUT=300         # Kill kubectl after this many seconds (default: 300)
+WAIT_LOOP_TIMEOUT=600       # Max wait time for job slots (default: 600)
+```
+
+**Why these are important:**
+- **MAX_CONCURRENT_DELETES**: Without this, 100 namespaces could spawn 100 kubectl processes simultaneously, overwhelming the API server and consuming excessive memory
+- **KUBECTL_TIMEOUT**: Prevents kubectl from hanging indefinitely due to network issues, stuck pods with finalizers, or API server problems
+- **WAIT_LOOP_TIMEOUT**: Provides deadlock protection - if kubectl processes hang, this ensures the script doesn't wait forever
+
+**Recommended values:**
+- Small clusters (< 50 nodes): `MAX_CONCURRENT_DELETES=5`
+- Medium clusters (50-200 nodes): `MAX_CONCURRENT_DELETES=10` (default)
+- Large clusters (> 200 nodes): `MAX_CONCURRENT_DELETES=20`
 
 ## Deletion Logic
 

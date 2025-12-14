@@ -192,6 +192,92 @@ This runs the cleanup at the start of every hour (e.g., 1:00, 2:00, 3:00...).
 
 **Time format:** Use `M` for minutes, `H` for hours, `D` for days. Example: `30M`, `2H`, `7D`
 
+### Pod Deletion Configuration
+
+The pod deletion system uses batching and controlled parallelism for efficiency and safety.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `POD_BATCH_SIZE` | `50` | Number of pods to delete in a single kubectl command |
+| `POD_FORCE_DELETE` | `false` | Use `--force --grace-period=0` for immediate termination |
+| `POD_BACKGROUND_DELETE` | `true` | Run kubectl delete in background (enables parallelism) |
+| `MAX_CONCURRENT_DELETES` | `10` | Maximum parallel kubectl delete processes |
+| `KUBECTL_TIMEOUT` | `300` | Timeout for individual kubectl commands (seconds) |
+| `WAIT_LOOP_TIMEOUT` | `600` | Maximum wait time for job slots (seconds) |
+
+#### Why Concurrency Controls Are Important
+
+When cleaning up pods across many namespaces, **uncontrolled parallelism can cause serious problems:**
+
+**Without MAX_CONCURRENT_DELETES:**
+- 100 namespaces could spawn 100 kubectl processes simultaneously
+- Each kubectl process consumes memory and file descriptors
+- Kubernetes API server gets overwhelmed with concurrent requests
+- System may run out of resources, crash, or become unresponsive
+
+**Without KUBECTL_TIMEOUT:**
+- kubectl can hang indefinitely due to network issues, stuck pods, or API problems
+- Hung processes block cleanup indefinitely
+- Script may never complete, missing subsequent cron runs
+- No indication of what went wrong
+
+**Without WAIT_LOOP_TIMEOUT:**
+- If kubectl processes hang, the wait loop becomes infinite
+- Complete script deadlock - no progress possible
+- Requires manual intervention to kill the script
+
+#### Recommended Values by Cluster Size
+
+| Cluster Size | Nodes | MAX_CONCURRENT_DELETES | KUBECTL_TIMEOUT | Notes |
+|--------------|-------|------------------------|-----------------|-------|
+| **Small** | < 50 | 5 | 300 (5 min) | Conservative limits for smaller API servers |
+| **Medium** | 50-200 | 10 | 300 (5 min) | Default configuration (balanced) |
+| **Large** | > 200 | 20 | 600 (10 min) | Higher concurrency for large-scale operations |
+
+#### Tuning Guidelines
+
+**Increase MAX_CONCURRENT_DELETES if:**
+- You have a large cluster with many namespaces
+- Pod deletion takes too long sequentially
+- API server has spare capacity (check CPU/memory usage)
+
+**Decrease MAX_CONCURRENT_DELETES if:**
+- API server shows high load during cleanup
+- You see "too many requests" or rate limiting errors
+- System resources (memory, file descriptors) are constrained
+
+**Increase KUBECTL_TIMEOUT if:**
+- Pods have complex finalizers that take time
+- Network latency to API server is high
+- You see legitimate deletions timing out
+
+**Decrease KUBECTL_TIMEOUT if:**
+- You want faster detection of hung processes
+- Your cluster typically has fast pod terminations
+- You're willing to retry on timeout
+
+#### Example Scenarios
+
+**Scenario 1: 200 pods across 50 namespaces (4 pods each)**
+```
+Batching: 4 pods/namespace = 50 kubectl commands (1 per namespace)
+Concurrency: With MAX_CONCURRENT_DELETES=10, runs 10 at a time
+Result: 5 waves of 10 parallel deletions = efficient and controlled
+```
+
+**Scenario 2: 500 pods in 1 namespace**
+```
+Batching: 500 pods / 50 batch_size = 10 kubectl commands
+Concurrency: All 10 run in parallel (< MAX_CONCURRENT_DELETES)
+Result: Fast cleanup without overwhelming the system
+```
+
+**Scenario 3: 5000 pods across 100 namespaces**
+```
+Without limits: 100+ kubectl processes spawn immediately (DANGEROUS!)
+With limits: MAX 10 concurrent, others wait → controlled and safe
+```
+
 ### Editing Configuration
 
 ```bash
@@ -357,6 +443,95 @@ kubectl label pod <pod-name> -n <namespace> keep-alive=true --overwrite
 1. Check if the hard limit was reached (overrides keep-alive)
 2. Verify the keep-alive label is correctly set (`keep-alive=true`, not `keep-alive: true`)
 3. Review the configuration for the correct user type limits
+
+### kubectl processes appear hung or script never completes
+
+**Symptoms:**
+- Script runs for hours without completing
+- Lock file exists but cleanup isn't progressing
+- High number of kubectl processes visible in process list
+
+**Diagnosis:**
+
+```bash
+# Check for running kubectl processes
+ps aux | grep kubectl
+
+# Check how long the script has been running
+ps aux | grep auto-cleanup
+
+# Check lock file age
+ls -la /var/run/auto-cleanup.lock
+```
+
+**Solutions:**
+
+1. **Check logs for timeout messages:**
+   ```bash
+   sudo tail -100 /var/log/giindia/auto-cleanup/auto-cleanup-$(date +%Y-%m-%d).log | grep -i timeout
+   ```
+
+2. **Verify timeout settings are reasonable:**
+   - KUBECTL_TIMEOUT should be 300-600 seconds (5-10 minutes)
+   - WAIT_LOOP_TIMEOUT should be at least 2× KUBECTL_TIMEOUT
+   - Edit `/etc/auto-cleanup/auto-cleanup.conf` if needed
+
+3. **Check for stuck pods in Terminating state:**
+   ```bash
+   kubectl get pods --all-namespaces | grep Terminating
+   ```
+   Pods with finalizers can cause kubectl to hang. Force delete if necessary:
+   ```bash
+   kubectl delete pod <pod-name> -n <namespace> --force --grace-period=0
+   ```
+
+4. **Reduce concurrency if API server is overloaded:**
+   ```bash
+   # In /etc/auto-cleanup/auto-cleanup.conf
+   MAX_CONCURRENT_DELETES=5  # Reduce from 10 to 5
+   ```
+
+5. **Kill hung processes manually (emergency only):**
+   ```bash
+   # Kill all kubectl delete processes
+   pkill -f "kubectl delete"
+
+   # Remove lock file
+   sudo rm -f /var/run/auto-cleanup.lock
+   ```
+
+### Performance issues or API server errors
+
+**Symptoms:**
+- "too many requests" errors in logs
+- API server shows high CPU/memory usage during cleanup
+- Cluster performance degrades during cleanup runs
+
+**Solutions:**
+
+1. **Reduce MAX_CONCURRENT_DELETES:**
+   ```bash
+   # In /etc/auto-cleanup/auto-cleanup.conf
+   MAX_CONCURRENT_DELETES=5  # Lower value = less API server load
+   ```
+
+2. **Disable background deletion (sequential mode):**
+   ```bash
+   # In /etc/auto-cleanup/auto-cleanup.conf
+   POD_BACKGROUND_DELETE=false  # Slower but more predictable load
+   ```
+
+3. **Reduce batch size:**
+   ```bash
+   # In /etc/auto-cleanup/auto-cleanup.conf
+   POD_BATCH_SIZE=25  # Smaller batches = less memory per kubectl process
+   ```
+
+4. **Run cleanup during off-peak hours:**
+   ```bash
+   # Update cron schedule to run at night
+   echo '0 2 * * * root /usr/local/bin/auto-cleanup' | sudo tee /etc/cron.d/auto-cleanup
+   ```
 
 ---
 

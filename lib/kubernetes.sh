@@ -14,7 +14,8 @@
 [[ -n "$_KUBERNETES_SH_LOADED" ]] && return 0
 readonly _KUBERNETES_SH_LOADED=1
 
-# Module version
+# Module version (used by show_version() in main script)
+# shellcheck disable=SC2034
 readonly KUBERNETES_VERSION="1.0.0"
 
 # ============================================================================

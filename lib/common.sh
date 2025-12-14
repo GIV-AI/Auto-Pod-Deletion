@@ -15,7 +15,8 @@
 [[ -n "$_COMMON_SH_LOADED" ]] && return 0
 readonly _COMMON_SH_LOADED=1
 
-# Module version
+# Module version (used by show_version() in main script)
+# shellcheck disable=SC2034
 readonly COMMON_VERSION="1.0.0"
 
 # ============================================================================
@@ -37,6 +38,7 @@ if [[ -t 1 ]]; then
     readonly BOLD=$'\033[1m'        # Bold text
 else
     # Non-interactive (cron, pipe, redirect) - disable colors
+    # shellcheck disable=SC2034  # Color variables defined for consistency
     readonly RED="" GREEN="" YELLOW="" BLUE="" CYAN="" NC="" BOLD=""
 fi
 
@@ -431,7 +433,7 @@ command_exists() {
 # ----------------------------------------------------------------------------
 check_dependencies() {
     local missing=()
-    local deps=(kubectl date awk grep sed flock)
+    local deps=(kubectl date awk grep sed flock timeout)
 
     for dep in "${deps[@]}"; do
         if ! command_exists "$dep"; then
