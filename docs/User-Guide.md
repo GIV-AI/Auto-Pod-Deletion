@@ -48,6 +48,30 @@ Your resources are subject to two types of limits based on your namespace prefix
 
 You can temporarily protect your resources from **soft limit** deletion by adding a `keep-alive` label. This label can be added when you create a resource or added later to already running resources.
 
+### Adding the Keep-Alive Label When Creating Resources
+
+You can include the `keep-alive` label directly in your YAML manifest when creating a new resource:
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-training-job
+  namespace: dgx-s-username
+  labels:
+    keep-alive: "true"
+spec:
+  containers:
+  - name: pytorch
+    image: pytorch/pytorch:latest
+    command: ["python", "train.py"]
+    resources:
+      limits:
+        nvidia.com/gpu: 1
+```
+
+**Note:** The same pattern applies to Deployments and Services. Simply add `keep-alive: "true"` under the `metadata.labels` section of your YAML manifest.
+
 ### Adding the Keep-Alive Label to Existing Resources
 
 You can add the `keep-alive` label to resources that are already running:
