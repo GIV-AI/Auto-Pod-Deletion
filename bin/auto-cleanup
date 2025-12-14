@@ -1,0 +1,283 @@
+#!/bin/bash
+# ============================================================================
+# Auto-Cleanup - Main Entry Point
+# ============================================================================
+# Kubernetes auto-cleanup tool for multi-user GPU clusters (DGX, HPC, academic
+# labs). Automatically deletes stale Deployments, Pods, and Services based on
+# configurable age limits with user-type policies.
+#
+# Usage:
+#   auto-cleanup [OPTIONS]
+#
+# Options:
+#   -h, --help      Show this help message
+#   -v, --version   Show version information
+#   -q, --quiet     Suppress non-error output (LOG_LEVEL=ERROR)
+#
+# Author: Anubhav <anubhav.patrick@giindia.com>
+# Organization: Global Infoventures
+# Date: 2025-12-12
+# ============================================================================
+
+# -o pipefail = Exit with the rightmost non-zero exit code in a pipeline.
+# We intentionally do NOT set -e (errexit) because we want explicit error handling
+# rather than immediate script termination on any command failure.
+# We do NOT set -u (nounset) to allow for optional config variables.
+set -o pipefail
+
+# ============================================================================
+# VERSION
+# ============================================================================
+readonly VERSION="1.0.0"
+
+# ============================================================================
+# SCRIPT DIRECTORY RESOLUTION
+# ============================================================================
+# Handle symlinked scripts (e.g., from /usr/local/bin → /opt/auto-cleanup/bin/)
+# This ensures library files are found relative to the actual script location,
+# not the symlink location.
+#
+# [[ -L file ]] = Test if file is a symbolic link
+# readlink -f = Resolve symlink to absolute canonical path (follows all links)
+# ${BASH_SOURCE[0]} = Path to the currently executing script
+if [[ -L "${BASH_SOURCE[0]}" ]]; then
+    REAL_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+    SCRIPT_DIR="$(cd "$(dirname "$REAL_PATH")" && pwd)"
+else
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
+
+# Library directory (relative to bin/)
+readonly LIB_DIR="${SCRIPT_DIR}/../lib"
+
+# ============================================================================
+# MODULE LOADING
+# ============================================================================
+# Load library modules with error handling
+
+# shellcheck source=../lib/common.sh
+source "${LIB_DIR}/common.sh" || {
+    echo "FATAL: Failed to load common.sh" >&2
+    exit 1
+}
+
+# shellcheck source=../lib/exclusions.sh
+source "${LIB_DIR}/exclusions.sh" || {
+    echo "FATAL: Failed to load exclusions.sh" >&2
+    exit 1
+}
+
+# shellcheck source=../lib/kubernetes.sh
+source "${LIB_DIR}/kubernetes.sh" || {
+    echo "FATAL: Failed to load kubernetes.sh" >&2
+    exit 1
+}
+
+# shellcheck source=../lib/cleanup.sh
+source "${LIB_DIR}/cleanup.sh" || {
+    echo "FATAL: Failed to load cleanup.sh" >&2
+    exit 1
+}
+
+# ============================================================================
+# HELP AND VERSION
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# show_help - Display usage information and exit
+# Description:
+#   Outputs a heredoc with usage, options, configuration paths, examples,
+#   and cron setup instructions.
+# ----------------------------------------------------------------------------
+show_help() {
+    cat << EOF
+Auto-Cleanup v${VERSION}
+
+Kubernetes auto-cleanup tool for multi-user GPU clusters.
+Automatically deletes stale Deployments, Pods, and Services based on
+configurable age limits with user-type policies.
+
+USAGE:
+    auto-cleanup [OPTIONS]
+
+OPTIONS:
+    -h, --help      Show this help message and exit
+    -v, --version   Show version information and exit
+    -q, --quiet     Suppress non-error output (set LOG_LEVEL=ERROR)
+
+CONFIGURATION:
+    Config file:    /etc/auto-cleanup/auto-cleanup.conf
+    Exclusions:     /etc/auto-cleanup/exclude_*
+    Logs:           /var/log/giindia/auto-cleanup/
+
+For development, config is read from conf/ relative to script location.
+
+EXAMPLES:
+    # Run cleanup with default settings
+    auto-cleanup
+
+    # Run in quiet mode (errors only)
+    auto-cleanup --quiet
+
+    # Check version
+    auto-cleanup --version
+
+CRON SETUP:
+    # Run hourly
+    0 * * * * /usr/local/bin/auto-cleanup
+
+EOF
+}
+
+# ----------------------------------------------------------------------------
+# show_version - Display version of main script and all loaded modules
+# Description:
+#   Shows version information for the main script and each library module.
+#   ${VAR:-default} returns "default" if VAR is unset or empty.
+# ----------------------------------------------------------------------------
+show_version() {
+    echo "Auto-Cleanup v${VERSION}"
+    echo "Common:     v${COMMON_VERSION:-unknown}"
+    echo "Exclusions: v${EXCLUSIONS_VERSION:-unknown}"
+    echo "Kubernetes: v${KUBERNETES_VERSION:-unknown}"
+    echo "Cleanup:    v${CLEANUP_VERSION:-unknown}"
+}
+
+# ============================================================================
+# ARGUMENT PARSING
+# ============================================================================
+# $# = Number of positional parameters remaining
+# shift = Remove the first positional parameter, shifting others down
+# -* = Pattern matching any string starting with a dash (unknown options)
+# *  = Default case for non-option arguments (break to stop parsing)
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            show_help
+            exit 0
+            ;;
+        -v|--version)
+            show_version
+            exit 0
+            ;;
+        -q|--quiet)
+            LOG_LEVEL="ERROR"
+            shift
+            ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Use --help for usage information" >&2
+            exit 1
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+# ============================================================================
+# CLEANUP HANDLER
+# ============================================================================
+# Ensures lock is released even on script termination or interruption.
+# $? captures the exit code of the last command before the trap fired,
+# preserving the original exit status when the script terminates.
+cleanup() {
+    local exit_code=$?
+    release_lock
+    log_info "Auto-Cleanup completed. Releasing lock."
+    exit $exit_code
+}
+
+# `trap` registers a handler function to run when the shell receives signals.
+# EXIT  = Normal script exit (including exit command)
+# INT   = SIGINT (Ctrl+C)
+# TERM  = SIGTERM (kill command default)
+# This ensures cleanup runs regardless of how the script terminates.
+trap cleanup EXIT INT TERM
+
+# ============================================================================
+# MAIN EXECUTION
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# main - Primary execution flow for auto-cleanup
+# Description:
+#   Orchestrates the cleanup process in the following order:
+#   1. Verify dependencies (kubectl, date, awk, grep, sed)
+#   2. Acquire exclusive lock to prevent concurrent runs
+#   3. Load configuration from standard locations
+#   4. Initialize day-wise logging
+#   5. Load exclusion lists (namespaces, deployments, pods, services)
+#   6. Initialize limit flags from config
+#   7. Process resources in order: Deployments → Pods → Services
+#
+# Returns:
+#   Exits with non-zero on fatal errors (dependency, config, logging failures)
+# ----------------------------------------------------------------------------
+main() {
+    echo "Auto-Cleanup (Deployments, Pods and Services) started..."
+
+    # --- DEPENDENCY CHECK ---
+    if ! check_dependencies; then
+        log_error "Dependency check failed"
+        exit 1
+    fi
+
+    # --- ACQUIRE LOCK ---
+    # Prevents concurrent execution of multiple cleanup instances
+    acquire_lock
+
+    # --- LOAD CONFIGURATION ---
+    if ! load_config; then
+        log_error "Failed to load configuration"
+        exit 1
+    fi
+
+    # --- INITIALIZE LOGGING ---
+    # Uses LOG_DIR from configuration (loaded above)
+    if ! init_logging; then
+        log_error "Failed to initialize logging"
+        exit 1
+    fi
+
+    # --- INITIALIZE EXCLUSION PATHS ---
+    # Prioritize /etc/auto-cleanup (installed) over relative conf/ (development)
+    local exclusion_dir
+    if [[ -d "/etc/auto-cleanup" ]]; then
+        exclusion_dir="/etc/auto-cleanup"
+    else
+        exclusion_dir="${SCRIPT_DIR}/../conf"
+    fi
+    init_exclusion_paths "$exclusion_dir"
+
+    # --- LOAD EXCLUSIONS ---
+    load_all_exclusions
+
+    # --- INITIALIZE LIMIT FLAGS ---
+    init_limit_flags
+
+    # --- PROCESS RESOURCES ---
+    # Order matters: Deployments → Pods → Services
+    # Why this order:
+    #   - Deleting a Deployment also terminates its managed Pods
+    #   - We only target standalone Pods (no owner references)
+    #   - Services are independent and processed last
+
+    # 1. Process Deployments (deletes Deployment + managed Pods/ReplicaSets)
+    process_deployments
+
+    # 2. Process Standalone Pods (only pods without ownerReferences)
+    process_pods
+
+    # 3. Flush Pod Deletion Queue (batched kubectl delete for efficiency)
+    flush_pod_queue
+
+    # 4. Process Services (independent of pods/deployments)
+    process_services
+
+    echo "Auto-Cleanup (Deployments, Pods and Services) completed."
+}
+
+# Run main function
+main "$@"
+

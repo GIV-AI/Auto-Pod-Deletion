@@ -1,0 +1,17 @@
+# ============================================================================
+# Excluded Namespaces
+# ============================================================================
+# List namespaces that should be completely excluded from cleanup.
+# Resources in these namespaces will never be deleted.
+#
+# Format: One namespace per line
+# Comments: Lines starting with # are ignored
+# Whitespace: Leading/trailing whitespace is trimmed
+#
+# Examples:
+#   kube-system
+#   monitoring
+#   dgx-s-admin
+# ============================================================================
+
+

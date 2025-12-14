@@ -1,0 +1,16 @@
+# ============================================================================
+# Excluded Services
+# ============================================================================
+# List service names that should be excluded from cleanup.
+# These services will not be deleted regardless of age.
+#
+# Format: One service name per line
+# Comments: Lines starting with # are ignored
+# Whitespace: Leading/trailing whitespace is trimmed
+#
+# Examples:
+#   external-api
+#   loadbalancer-svc
+# ============================================================================
+
+

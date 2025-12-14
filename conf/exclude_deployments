@@ -1,0 +1,16 @@
+# ============================================================================
+# Excluded Deployments
+# ============================================================================
+# List deployment names that should be excluded from cleanup.
+# These deployments will not be deleted regardless of age.
+#
+# Format: One deployment name per line
+# Comments: Lines starting with # are ignored
+# Whitespace: Leading/trailing whitespace is trimmed
+#
+# Examples:
+#   critical-app
+#   monitoring-agent
+# ============================================================================
+
+
