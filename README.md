@@ -31,7 +31,7 @@ auto-cleanup/
 │   ├── exclude_pods              # Pod exclusions
 │   └── exclude_services          # Service exclusions
 ├── docs/                         # Documentation
-├── tests/                        # Test suite (planned)
+├── tests/                        # Test suite 
 ├── install.sh                    # Installation script
 ├── uninstall.sh                  # Uninstallation script
 └── README.md
@@ -71,6 +71,31 @@ sudo ./uninstall.sh --keep-config
 
 # Keep logs
 sudo ./uninstall.sh --keep-logs
+```
+
+## Usage
+
+### Manual Execution
+
+```bash
+# Run with default settings
+sudo auto-cleanup
+
+# Quiet mode (errors only)
+sudo auto-cleanup --quiet
+
+# Show version
+auto-cleanup --version
+
+# Show help
+auto-cleanup --help
+```
+
+### Cron Setup
+
+```bash
+# Run hourly
+echo '0 * * * * root /usr/local/bin/auto-cleanup' | sudo tee /etc/cron.d/auto-cleanup
 ```
 
 ## Configuration
@@ -253,31 +278,6 @@ Edit files in `/etc/auto-cleanup/`:
 | `exclude_services` | Skip specific services |
 
 Format: One name per line, comments start with `#`
-
-## Usage
-
-### Manual Execution
-
-```bash
-# Run with default settings
-sudo auto-cleanup
-
-# Quiet mode (errors only)
-sudo auto-cleanup --quiet
-
-# Show version
-auto-cleanup --version
-
-# Show help
-auto-cleanup --help
-```
-
-### Cron Setup
-
-```bash
-# Run hourly
-echo '0 * * * * root /usr/local/bin/auto-cleanup' | sudo tee /etc/cron.d/auto-cleanup
-```
 
 ## Development
 
